@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 from . import transform
-from .config import AppConfig, EXPORT_DIR, STATE_PATH, ensure_dirs
+from .config import ALL_KNOWN_ORDER_STATUSES, AppConfig, EXPORT_DIR, STATE_PATH, ensure_dirs
 from .shopify_api import ShopifyClient, ShopifyError, UserError
 from .state import StateStore
 from .woo import WooClient, WooError
@@ -179,14 +179,34 @@ class Migrator:
     def test_woo(self) -> Dict[str, Any]:
         return self.woo.test_connection()
 
+    def discover_order_statuses(self) -> List[Dict[str, Any]]:
+        """The order statuses this store actually has, counts included.
+
+        Falls back to the fixed list of standard WooCommerce statuses (with
+        an unknown count) if the store's reports endpoint is not reachable —
+        older WooCommerce versions or a restricted key can both cause that.
+        """
+        try:
+            rows = self.woo.order_status_report()
+            if rows:
+                return [
+                    {"slug": r.get("slug", ""), "name": r.get("name") or r.get("slug", ""),
+                     "total": int(r.get("total") or 0)}
+                    for r in rows if r.get("slug")
+                ]
+            self.reporter.log("The store reported no order statuses at all.", "warn")
+        except WooError as exc:
+            self.reporter.log(f"Could not fetch order statuses from the store ({exc}); showing the standard list.", "warn")
+        return [{"slug": s, "name": s, "total": -1} for s in ALL_KNOWN_ORDER_STATUSES]
+
     def test_shopify(self) -> Dict[str, Any]:
         info = self.shopify.shop_info()
         if not self.location_gid:
             try:
                 self.location_gid = self.shopify.primary_location()
-                info["location"] = self.location_gid
             except ShopifyError as exc:
                 self.reporter.log(f"Could not read locations ({exc})", "warn")
+        info["location"] = self.location_gid
         try:
             granted = self.shopify.granted_scopes()
             info["scopes"] = ", ".join(sorted(granted)) or "none"
@@ -195,6 +215,27 @@ class Migrator:
         except ShopifyError:
             info["scopes"] = "unknown"
         return info
+
+    def _report_fulfillment_readiness(self) -> None:
+        if not self.opts.import_fulfillments:
+            return
+        if not self.location_gid:
+            try:
+                self.location_gid = self.shopify.primary_location()
+            except ShopifyError as exc:
+                self.reporter.log(f"Could not read locations ({exc})", "warn")
+        if self.location_gid:
+            self.reporter.log(
+                f"Fulfilment location: {self.location_gid} — completed WooCommerce orders will "
+                "be marked fulfilled there."
+            )
+        else:
+            self.reporter.log(
+                "No fulfilment location available — every order will import UNFULFILLED, "
+                "regardless of its WooCommerce status. Set 'Location ID' on Connections, or "
+                "check the store has an active location, then re-run.",
+                "warn",
+            )
 
     # -------------------------------------------------------- variant map
     def build_variant_map(self) -> int:
@@ -235,9 +276,14 @@ class Migrator:
         mode = self.opts.match_by
         if mode == "none":
             return None
-        if sku:
-            row = self.state.variant_by_sku(sku)
+        for candidate in transform.sku_candidates(sku):
+            row = self.state.variant_by_sku(candidate)
             if row:
+                if candidate != sku.strip():
+                    self.reporter.log(
+                        f"SKU '{sku}' matched Shopify variant by SKU '{candidate}' "
+                        "(exact SKU not found; matched after trimming).",
+                    )
                 return {"variant_gid": row["variant_gid"], "variant_id": row["variant_id"]}
         if mode == "sku_then_title" and title:
             row = self.state.variant_by_title(title)
@@ -524,6 +570,7 @@ class Migrator:
                 f"currency {info.get('currencyCode')}", "success",
             )
             self.check_scopes()
+            self._report_fulfillment_readiness()
             if self.opts.match_variants and self.opts.match_by != "none":
                 if not self.state.counts()["variants"]:
                     self.build_variant_map()

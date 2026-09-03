@@ -159,23 +159,52 @@ python -m woo2shopify.cli report                # CSVs in ~/.woo2shopify/exports
 4. Customers, then orders, oldest to newest.
 5. Check the Reports page, re-run to retry failures.
 
+## Choosing which orders come across
+
+The Options page's **Order statuses** card lists every status your store actually uses —
+press **Refresh from store** to replace the guessed list with the real one, custom
+statuses from a plugin included, each with its live order count. Only ticked statuses are
+imported. By default `completed`, `processing`, `on-hold` and `refunded` are ticked;
+`cancelled`, `failed`, `pending` and anything unrecognised start unticked — tick them in if
+you want them. `Select all` / `Select none` are there for a quick sweep. A refresh keeps
+whatever you already had ticked (matched by status slug), so it's safe to press again later
+in a run if new statuses show up.
+
+## SKU matching
+
+A SKU that fails an exact match is retried against a couple of safe, automatic variants
+before falling back to a custom line item: a trailing parenthetical is stripped (Woo's
+`MISHEE-1 (מוצר 1)` against Shopify's `MISHEE-1`, a common symptom of a translated or
+duplicated product), then just the first whitespace-separated token. The exact SKU is
+always tried first and preferred; nothing here invents a match — if none of the candidates
+hit an indexed Shopify SKU, the warning fires as before. A log line shows when a match came
+from normalisation rather than the exact SKU, so you can go clean up that SKU in Woo if
+you'd rather.
+
 ## Order-creation throttling
 
 Shopify limits how fast `orderCreate`/`customerCreate` can run on a bucket separate from
 the general GraphQL cost budget, and reports hitting it as a data error —
 `Too many attempts. Please try again later.` — not an HTTP 429. The tool recognises that
 specific message and retries with backoff (up to `Max retries` in Options); a real data
-error (a bad email, an invalid address) is never retried, only this one. If you still see
-it exhaust its retries on a very large import, raise **Extra delay between writes** in
-Options a few hundred ms — it adds a pause after every write and gives the bucket time to
-refill.
+error (a bad email, an invalid address) is never retried, only this one. On top of retrying, the tool paces itself: after a throttle it starts spacing writes out
+(up to 8s apart), and eases back off after 25 clean writes in a row — so a long run adapts
+instead of hitting the same wall every few orders. If you still see it exhaust retries,
+raise **Extra delay between writes** in Options a few hundred ms too.
 
-## Location ID
+## Location ID, and why an order might come in unfulfilled
 
-Leave this blank — the tool auto-detects your primary location on *Test Shopify*. If you
-fill it in yourself it must be exactly `gid://shopify/Location/<number>`; anything else
-(a pasted URL, an admin link) is detected and dropped with a warning rather than sent to
-Shopify, and fulfilments are skipped until it's fixed.
+Leave this blank — the tool auto-detects a location on *Test Shopify* and again at the
+start of a run, preferring one that is active and set to fulfil online orders. If it has
+to fall back to a less suitable one, or finds none at all, that's logged explicitly rather
+than left for you to notice later in Shopify — check the Run log (or press *Test Shopify*)
+for a line starting "Fulfilment location:" or "No fulfilment location available". Without
+one, every order imports unfulfilled regardless of its WooCommerce status; fulfilment
+otherwise only applies to orders whose Woo status is `completed`.
+
+If you fill the field in yourself it must be exactly `gid://shopify/Location/<number>`;
+anything else (a pasted URL, an admin link) is detected and dropped with a warning rather
+than sent to Shopify.
 
 ## Scopes, and why a run can stop immediately
 

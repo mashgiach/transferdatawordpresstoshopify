@@ -5,7 +5,7 @@ from __future__ import annotations
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QColor
@@ -24,7 +24,7 @@ from qfluentwidgets import (
     TextEdit,
 )
 
-from ..config import APP_DIR, DEFAULT_ORDER_STATUSES, AppConfig
+from ..config import ALL_KNOWN_ORDER_STATUSES, APP_DIR, DEFAULT_ORDER_STATUSES, AppConfig
 from ..oauth import DEFAULT_SCOPES, redirect_uri as oauth_redirect_uri
 from .common import FormBlock, FormCard, PageBase, VCard, checkbox, combo, line_edit, row, spin
 
@@ -162,6 +162,8 @@ class ConnectionPage(PageBase):
 
 # -------------------------------------------------------------------- options
 class OptionsPage(PageBase):
+    refreshStatusesRequested = pyqtSignal()
+
     def __init__(self, config: AppConfig, parent=None):
         super().__init__(
             "optionsPage",
@@ -191,18 +193,29 @@ class OptionsPage(PageBase):
         self.dateTo = card.add("To (YYYY-MM-DD)", line_edit("leave blank for today", opts.date_to))
         self.add_card(card)
 
-        card = VCard("Order statuses", self)
-        holder = QWidget(card)
-        grid = QGridLayout(holder)
-        grid.setContentsMargins(0, 0, 0, 0)
+        statusCard = VCard("Order statuses", self)
+        statusCard.add_widget(BodyLabel(
+            "Only ticked statuses are imported — untick anything you don't want, 'failed' and "
+            "'cancelled' included. 'Refresh from store' replaces this with your store's real "
+            "statuses and how many orders carry each, custom ones from a plugin included.", statusCard,
+        ))
+        self.refreshStatusesBtn = PushButton(FluentIcon.SYNC, "Refresh from store")
+        self.selectAllStatusesBtn = PushButton("Select all")
+        self.selectNoneStatusesBtn = PushButton("Select none")
+        self.refreshStatusesBtn.clicked.connect(self.refreshStatusesRequested.emit)
+        self.selectAllStatusesBtn.clicked.connect(lambda: self._set_all_statuses(True))
+        self.selectNoneStatusesBtn.clicked.connect(lambda: self._set_all_statuses(False))
+        statusCard.add_widget(row(self.refreshStatusesBtn, self.selectAllStatusesBtn, self.selectNoneStatusesBtn))
+        self.statusHolder = QWidget(statusCard)
+        self.statusGrid = QGridLayout(self.statusHolder)
+        self.statusGrid.setContentsMargins(0, 0, 0, 0)
+        statusCard.add_widget(self.statusHolder)
         self.statusBoxes: Dict[str, CheckBox] = {}
-        for index, status in enumerate(DEFAULT_ORDER_STATUSES):
-            box = CheckBox(status, holder)
-            box.setChecked(status in opts.order_statuses)
-            self.statusBoxes[status] = box
-            grid.addWidget(box, index // 4, index % 4)
-        card.add_widget(holder)
-        self.add_card(card)
+        self.populate_statuses(
+            [{"slug": s, "name": s, "total": -1} for s in ALL_KNOWN_ORDER_STATUSES],
+            selected=set(opts.order_statuses),
+        )
+        self.add_card(statusCard)
 
         card = FormCard("Product matching", self)
         self.matchBy = card.add("Match line items by", combo(["sku", "sku_then_title", "none"], opts.match_by),
@@ -236,6 +249,42 @@ class OptionsPage(PageBase):
         self.retries = card.add("Max retries", spin(1, 20, opts.max_retries))
         self.delay = card.add("Extra delay between writes (ms)", spin(0, 5000, int(opts.request_delay * 1000)))
         self.add_card(card)
+
+    def populate_statuses(self, rows: List[Dict[str, object]], selected: Optional[set] = None) -> None:
+        """(Re)build the status checkboxes from [{"slug","name","total"}].
+
+        A refresh keeps whatever the user had ticked (matched by slug) rather
+        than resetting to the defaults; `selected` is only used the first
+        time, before there is any prior state to preserve.
+        """
+        if selected is None:
+            selected = {slug for slug, box in self.statusBoxes.items() if box.isChecked()}
+            if not self.statusBoxes:
+                selected = set(DEFAULT_ORDER_STATUSES)
+
+        while self.statusGrid.count():
+            item = self.statusGrid.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.setParent(None)
+                widget.deleteLater()
+        self.statusBoxes = {}
+
+        for index, entry in enumerate(rows):
+            slug = entry["slug"]
+            total = entry.get("total", -1)
+            label = entry.get("name") or slug
+            text = f"{label} ({slug})" if label != slug else slug
+            if isinstance(total, (int, float)) and total >= 0:
+                text += f" — {int(total)}"
+            box = CheckBox(text, self.statusHolder)
+            box.setChecked(slug in selected)
+            self.statusBoxes[slug] = box
+            self.statusGrid.addWidget(box, index // 2, index % 2)
+
+    def _set_all_statuses(self, checked: bool) -> None:
+        for box in self.statusBoxes.values():
+            box.setChecked(checked)
 
     def apply(self, config: AppConfig) -> None:
         opts = config.options

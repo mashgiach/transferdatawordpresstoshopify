@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -14,6 +15,7 @@ from woo2shopify import transform  # noqa: E402
 from woo2shopify.config import AppConfig, ShopifyConfig  # noqa: E402
 from woo2shopify.config import MigrationOptions
 from woo2shopify.migrator import Migrator, Reporter  # noqa: E402
+from woo2shopify.woo import WooError  # noqa: E402
 
 
 # One mock server for the whole module; the Shopify client is pointed at it
@@ -230,6 +232,30 @@ class OrderPayloadFieldsTest(MockStoreHarness, unittest.TestCase):
             a.get("key") == "woo_order_number" and a.get("value") == "501" for a in o.get("customAttributes", [])
         ))
         self.assertEqual(completed["fulfillment"]["locationId"], "gid://shopify/Location/55")
+        migrator.close()
+
+
+class OrderStatusDiscoveryTest(MockStoreHarness, unittest.TestCase):
+    """The store's real order statuses, custom ones included, replace the guessed list."""
+
+    def test_discover_returns_the_stores_real_statuses_with_counts(self):
+        migrator, _logs = self.build()
+        rows = migrator.discover_order_statuses()
+        by_slug = {r["slug"]: r for r in rows}
+        self.assertEqual(by_slug["completed"]["total"], 2)
+        self.assertEqual(by_slug["hazmana-supplier"]["name"], "Waiting on supplier")
+        migrator.close()
+
+    def test_falls_back_to_the_standard_list_on_a_woo_error(self):
+        from woo2shopify import migrator as migrator_module
+
+        migrator, logs = self.build()
+        with mock.patch.object(migrator.woo, "order_status_report", side_effect=WooError("boom")):
+            rows = migrator.discover_order_statuses()
+        slugs = {r["slug"] for r in rows}
+        self.assertEqual(slugs, set(migrator_module.ALL_KNOWN_ORDER_STATUSES))
+        self.assertTrue(all(r["total"] == -1 for r in rows), "an unreachable report must not fake a count")
+        self.assertTrue(any("Could not fetch order statuses" in m for _l, m in logs))
         migrator.close()
 
 

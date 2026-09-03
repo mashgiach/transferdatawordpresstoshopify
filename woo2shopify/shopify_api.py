@@ -120,6 +120,12 @@ class ShopifyClient:
         self.max_retries = max_retries
         self.request_delay = request_delay
         self._log = log or (lambda msg, level="info": None)
+        # Self-pacing for the order/customer mutation throttle: once it's hit,
+        # proactively space out writes instead of only reacting after the fact —
+        # a large migration would otherwise re-hit the same wall every few
+        # orders and burn its retries on backoff instead of on real progress.
+        self._mutation_pace = 0.0
+        self._clean_mutations = 0
         self.session = requests.Session()
         self.session.headers.update(
             {
@@ -218,6 +224,9 @@ class ShopifyClient:
         attempts. Please try again later."), not an HTTP 429, so it needs its
         own retry loop here rather than being caught upstream.
         """
+        if self._mutation_pace:
+            time.sleep(self._mutation_pace)
+
         delay = 3.0
         for attempt in range(1, self.max_retries + 1):
             data = self.graphql(query, variables)
@@ -232,10 +241,30 @@ class ShopifyClient:
                     )
                     time.sleep(delay)
                     delay = min(delay * 2, 60)
+                    self._raise_mutation_pace()
                     continue
                 raise
+            self._ease_mutation_pace()
             return node
         raise AssertionError("unreachable")  # loop above always returns or raises
+
+    def _raise_mutation_pace(self) -> None:
+        self._clean_mutations = 0
+        before = self._mutation_pace
+        self._mutation_pace = min(self._mutation_pace + 1.0, 8.0)
+        if self._mutation_pace != before:
+            self._log(f"Pacing order/customer writes {self._mutation_pace:.0f}s apart to stay under the limit.", "warn")
+
+    def _ease_mutation_pace(self) -> None:
+        if not self._mutation_pace:
+            return
+        self._clean_mutations += 1
+        if self._clean_mutations < 25:
+            return
+        self._clean_mutations = 0
+        self._mutation_pace = max(self._mutation_pace - 1.0, 0.0)
+        if not self._mutation_pace:
+            self._log("Back to full speed — no throttling for a while.", "success")
 
     # ------------------------------------------------------------------ REST
     def rest(self, method: str, path: str, payload: Optional[Dict[str, Any]] = None,
@@ -288,14 +317,39 @@ class ShopifyClient:
         return data.get("shop") or {}
 
     def primary_location(self) -> str:
+        """The location to fulfil imported orders at, best-effort but never silent.
+
+        Prefers a location that is both active and set to fulfil online
+        orders; falls back one step at a time, logging why, rather than
+        quietly returning nothing and leaving every completed order
+        unfulfilled with no explanation.
+        """
         data = self.graphql(
-            "{ locations(first: 5, includeInactive: false) { edges { node { id name isActive } } } }"
+            "{ locations(first: 20) { edges { node { id name isActive fulfillsOnlineOrders } } } }"
         )
-        for edge in (data.get("locations") or {}).get("edges", []):
-            node = edge["node"]
-            if node.get("isActive", True):
+        nodes = [edge["node"] for edge in (data.get("locations") or {}).get("edges", [])]
+        if not nodes:
+            self._log("Shopify returned no locations for this store — fulfilments will be skipped.", "warn")
+            return ""
+
+        for node in nodes:
+            if node.get("isActive", True) and node.get("fulfillsOnlineOrders", True):
                 return node["id"]
-        return ""
+
+        for node in nodes:
+            if node.get("isActive", True):
+                self._log(
+                    f"Using location '{node.get('name')}' for fulfilments — it is active but not "
+                    "flagged to fulfil online orders, so this may still be rejected.", "warn",
+                )
+                return node["id"]
+
+        self._log(
+            f"No active location found; falling back to '{nodes[0].get('name')}' (inactive). "
+            "Fulfilments will likely fail — set Location ID on Connections once you know the "
+            "right one.", "warn",
+        )
+        return nodes[0]["id"]
 
     SCOPES_QUERY = "{ currentAppInstallation { accessScopes { handle } } }"
 

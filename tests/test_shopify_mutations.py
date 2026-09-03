@@ -74,6 +74,44 @@ class OrderMutationThrottleTest(unittest.TestCase):
         self.assertFalse(UserError([{"field": ["email"], "message": "Email has already been taken"}]).is_throttled)
 
 
+class MutationPacingTest(unittest.TestCase):
+    """After being throttled, subsequent writes should slow down proactively,
+    not just react to the same wall again a few orders later."""
+
+    def test_pace_increases_on_a_throttle_and_is_applied_next_time(self):
+        c = client()
+        with mock.patch.object(c, "graphql", side_effect=[THROTTLED, OK_CUSTOMER]), mock.patch("time.sleep"):
+            c.create_customer({"email": "a@b.com"})
+        self.assertGreater(c._mutation_pace, 0)
+
+        pace_after_throttle = c._mutation_pace
+        with mock.patch.object(c, "graphql", return_value=OK_CUSTOMER) as g, mock.patch("time.sleep") as sleep2:
+            c.create_customer({"email": "b@c.com"})
+        sleep2.assert_called_once_with(pace_after_throttle)
+        self.assertEqual(g.call_count, 1, "a paced-but-otherwise-clean call must not itself retry")
+
+    def test_pace_does_not_grow_past_the_cap(self):
+        c = client()
+        c._mutation_pace = 8.0
+        with mock.patch.object(c, "graphql", side_effect=[THROTTLED, OK_CUSTOMER]), mock.patch("time.sleep"):
+            c.create_customer({"email": "a@b.com"})
+        self.assertEqual(c._mutation_pace, 8.0)
+
+    def test_pace_eases_off_after_a_run_of_clean_mutations(self):
+        c = client()
+        c._mutation_pace = 2.0
+        with mock.patch.object(c, "graphql", return_value=OK_CUSTOMER), mock.patch("time.sleep"):
+            for _ in range(25):
+                c.create_customer({"email": "ok@b.com"})
+        self.assertLess(c._mutation_pace, 2.0)
+
+    def test_clean_mutation_run_is_not_reset_by_pacing_alone(self):
+        c = client()
+        with mock.patch.object(c, "graphql", return_value=OK_CUSTOMER), mock.patch("time.sleep"):
+            c.create_customer({"email": "a@b.com"})
+        self.assertEqual(c._mutation_pace, 0.0, "no throttle ever happened, so there is nothing to pace")
+
+
 class TaxLinePlacementTest(unittest.TestCase):
     """Shopify: 'Order Tax lines must be associated with either order or line item but not both.'"""
 

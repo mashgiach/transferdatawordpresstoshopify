@@ -77,6 +77,7 @@ class MigrationWorker(QThread):
 
 
 class ConnectionTestWorker(QThread):
+    sig_log = pyqtSignal(str, str)
     sig_result = pyqtSignal(str, bool, str, dict)  # target, ok, message, payload
 
     def __init__(self, config: AppConfig, target: str, parent=None):
@@ -87,8 +88,9 @@ class ConnectionTestWorker(QThread):
     def run(self) -> None:
         migrator = None
         payload: Dict[str, Any] = {}
+        reporter = Reporter(on_log=lambda message, level="info": self.sig_log.emit(message, level))
         try:
-            migrator = Migrator(self.config, reporter=Reporter(), control=Control())
+            migrator = Migrator(self.config, reporter=reporter, control=Control())
             if self.target == "woo":
                 payload = migrator.test_woo()
                 message = (f"WooCommerce reachable — {payload['customers']} customers, "
@@ -101,9 +103,41 @@ class ConnectionTestWorker(QThread):
                            f"Scopes: {payload.get('scopes', 'unknown')}")
                 if payload.get("missing_scopes"):
                     message += f"\nMISSING for this run: {payload['missing_scopes']}"
+                if payload.get("location"):
+                    message += f"\nFulfilment location: {payload['location']}"
+                elif self.config.options.import_fulfillments:
+                    message += "\nNo fulfilment location found — completed orders would import UNFULFILLED."
             self.sig_result.emit(self.target, True, message, payload)
         except Exception as exc:
             self.sig_result.emit(self.target, False, f"{type(exc).__name__}: {exc}", payload)
+        finally:
+            if migrator is not None:
+                try:
+                    migrator.close()
+                except Exception:
+                    pass
+
+
+class StatusDiscoveryWorker(QThread):
+    """Fetches the store's real order statuses (and counts) in the background."""
+
+    sig_log = pyqtSignal(str, str)
+    sig_result = pyqtSignal(list)  # [{"slug", "name", "total"}, ...]
+
+    def __init__(self, config: AppConfig, parent=None):
+        super().__init__(parent)
+        self.config = config
+
+    def run(self) -> None:
+        reporter = Reporter(on_log=lambda message, level="info": self.sig_log.emit(message, level))
+        migrator = None
+        try:
+            migrator = Migrator(self.config, reporter=reporter, control=Control())
+            rows = migrator.discover_order_statuses()
+            self.sig_result.emit(rows)
+        except Exception as exc:
+            self.sig_log.emit(f"{type(exc).__name__}: {exc}", "error")
+            self.sig_result.emit([])
         finally:
             if migrator is not None:
                 try:

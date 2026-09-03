@@ -145,6 +145,14 @@ class Handler(BaseHTTPRequestHandler):
         query = {k: v[0] for k, v in parse_qs(url.query).items()}
         page = int(query.get("page", 1))
 
+        if url.path.endswith("/wp-json/wc/v3/reports/orders/totals"):
+            return self._send([
+                {"slug": "completed", "name": "Completed", "total": 2},
+                {"slug": "processing", "name": "Processing", "total": 1},
+                {"slug": "refunded", "name": "Refunded", "total": 1},
+                {"slug": "hazmana-supplier", "name": "Waiting on supplier", "total": 3},
+            ])
+
         if url.path.endswith("/wp-json/wc/v3/customers"):
             items = CUSTOMERS if page == 1 else []
             return self._send(items, headers={"X-WP-Total": str(len(CUSTOMERS)), "X-WP-TotalPages": "1"})

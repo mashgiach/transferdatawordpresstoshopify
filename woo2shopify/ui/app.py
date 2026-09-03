@@ -24,7 +24,7 @@ from ..config import AppConfig, CONFIG_PATH, ensure_dirs
 from ..oauth import apply_grant, describe_token_problem
 from ..state import StateStore
 from .pages import ConnectionPage, OptionsPage, ProductsPage, ReportsPage, RunPage
-from .worker import ConnectionTestWorker, MigrationWorker, TokenWorker
+from .worker import ConnectionTestWorker, MigrationWorker, StatusDiscoveryWorker, TokenWorker
 
 
 class MainWindow(FluentWindow):
@@ -35,6 +35,7 @@ class MainWindow(FluentWindow):
         self.worker: Optional[MigrationWorker] = None
         self.testWorker: Optional[ConnectionTestWorker] = None
         self.tokenWorker: Optional[TokenWorker] = None
+        self.statusWorker: Optional[StatusDiscoveryWorker] = None
         self._tokenMode = ""
 
         self.connectionPage = ConnectionPage(self.config, self)
@@ -80,6 +81,7 @@ class MainWindow(FluentWindow):
         self.reportsPage.refreshRequested.connect(self.refresh_reports)
         self.reportsPage.exportRequested.connect(self.export_reports)
         self.reportsPage.resetRequested.connect(self.reset_state)
+        self.optionsPage.refreshStatusesRequested.connect(self.refresh_order_statuses)
 
     # ---------------------------------------------------------------- config
     def collect_config(self) -> AppConfig:
@@ -122,6 +124,7 @@ class MainWindow(FluentWindow):
             return
         self.config.save()
         self.testWorker = ConnectionTestWorker(self.config, target, self)
+        self.testWorker.sig_log.connect(self.runPage.append_log)
         self.testWorker.sig_result.connect(self.on_test_result)
         self.testWorker.start()
         self.toast("Testing…", f"Contacting {'WooCommerce' if target == 'woo' else 'Shopify'}.", "info")
@@ -171,6 +174,28 @@ class MainWindow(FluentWindow):
             self.toast("Token ready", message + ". Try 'Test Shopify'.", "success")
         else:
             self.toast("Could not get a token", message, "error")
+
+    def refresh_order_statuses(self) -> None:
+        if not self.validate(need_woo=True, need_shopify=False):
+            return
+        if self.statusWorker and self.statusWorker.isRunning():
+            return
+        config = self.collect_config()
+        config.save()
+        self.optionsPage.refreshStatusesBtn.setEnabled(False)
+        self.toast("Fetching order statuses…", "Reading the real statuses (and counts) from WooCommerce.", "info")
+        self.statusWorker = StatusDiscoveryWorker(config, self)
+        self.statusWorker.sig_log.connect(self.runPage.append_log)
+        self.statusWorker.sig_result.connect(self.on_order_statuses)
+        self.statusWorker.start()
+
+    def on_order_statuses(self, rows: list) -> None:
+        self.optionsPage.refreshStatusesBtn.setEnabled(True)
+        if not rows:
+            self.toast("Could not fetch order statuses", "Kept the current list — see the Run log for details.", "error")
+            return
+        self.optionsPage.populate_statuses(rows)
+        self.toast("Order statuses updated", f"{len(rows)} statuses found — review the ticks before running.", "success")
 
     # --------------------------------------------------------------- running
     def start_task(self, task: str) -> None:

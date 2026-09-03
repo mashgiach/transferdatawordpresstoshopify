@@ -16,15 +16,30 @@ LOG_PATH = APP_DIR / "migration.log"
 
 DEFAULT_API_VERSION = "2025-01"
 
-# Woo statuses we import by default. "trash" and "checkout-draft" are skipped.
+# The standard WooCommerce order statuses, shown as checkboxes before the store
+# has been asked what it actually has (see Migrator.discover_order_statuses,
+# which replaces this with the store's real statuses and counts, custom
+# plugin statuses included). "trash" and "checkout-draft" are never offered —
+# neither represents a real order.
+ALL_KNOWN_ORDER_STATUSES = [
+    "completed",
+    "processing",
+    "on-hold",
+    "refunded",
+    "cancelled",
+    "failed",
+    "pending",
+]
+
+# Pre-ticked by default: orders that represent an actual sale. "cancelled",
+# "failed" and "pending" are real WooCommerce statuses worth being able to
+# import, but they are not sales, so they start unticked rather than lumped
+# in with the rest — opt in per-status instead of pruning them after a run.
 DEFAULT_ORDER_STATUSES = [
     "completed",
     "processing",
     "on-hold",
-    "cancelled",
     "refunded",
-    "failed",
-    "pending",
 ]
 
 

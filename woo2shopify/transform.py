@@ -23,6 +23,7 @@ FINANCIAL_STATUS = {
 
 PROVINCE_CODE_RE = re.compile(r"^[A-Za-z0-9]{1,3}$")
 LOCATION_GID_RE = re.compile(r"^gid://shopify/Location/\d+$")
+TRAILING_PAREN_RE = re.compile(r"\s*\([^()]*\)\s*$")
 E164_RE = re.compile(r"^\+[1-9]\d{7,15}$")
 
 
@@ -42,6 +43,31 @@ def money_str(value: Any) -> str:
 
 def is_valid_location_gid(value: str) -> bool:
     return bool(value and LOCATION_GID_RE.match(value.strip()))
+
+
+def sku_candidates(sku: str) -> List[str]:
+    """Exact SKU first, then a couple of cheap, safe normalisations.
+
+    A recurring real-world case: a WooCommerce SKU carries a trailing
+    parenthetical the Shopify SKU never had — 'MISHEE-1 (מוצר 1)' in the shop
+    versus 'MISHEE-1' in Shopify. Each candidate is only tried after the exact
+    SKU misses, in order, and the caller stops at the first that matches an
+    actual Shopify variant — nothing here invents a match on its own.
+    """
+    raw = (sku or "").strip()
+    if not raw:
+        return []
+    candidates = [raw]
+
+    stripped = TRAILING_PAREN_RE.sub("", raw).strip()
+    if stripped and stripped != raw:
+        candidates.append(stripped)
+
+    first_token = raw.split()[0] if raw.split() else ""
+    if first_token and first_token not in candidates:
+        candidates.append(first_token)
+
+    return candidates
 
 
 def money_bag(amount: Any, currency: str) -> Dict[str, Any]:

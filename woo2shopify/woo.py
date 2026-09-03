@@ -102,6 +102,14 @@ class WooClient:
         total_customers = self.count("customers", role="all")
         return {"orders": total_orders, "customers": total_customers}
 
+    def order_status_report(self) -> List[Dict[str, Any]]:
+        """Every order status this store actually has, with how many orders
+
+        carry it — including any custom status from a plugin, which a fixed
+        checkbox list could never show. `[{"slug", "name", "total"}, ...]`.
+        """
+        return self.get("reports/orders/totals") or []
+
     # ------------------------------------------------------------- customers
     def iter_customers(self, page_size: int = 100) -> Iterator[Dict[str, Any]]:
         yield from self.paginate(
