@@ -1,0 +1,122 @@
+# WooCommerce → Shopify migration (customers & orders)
+
+Moves **customers, WordPress users and order history** out of WooCommerce into Shopify.
+Products are assumed to already be in Shopify — order line items are re-linked to the
+existing Shopify variants by SKU.
+
+Ships with a PyQt5 / [PyQt-Fluent-Widgets](https://pyqt-fluent-widgets.readthedocs.io/en/latest/)
+desktop UI and an equivalent command line interface.
+
+![pages](docs/screenshot-run.png)
+
+## What gets migrated
+
+| WooCommerce | Shopify |
+|---|---|
+| Customers (`/wc/v3/customers`) | Customers, with billing + shipping address, phone, tags, note |
+| Guest-order buyers | Customers built from the order's billing block |
+| WordPress users with no orders (optional) | Customers tagged `wp-user`, `wp-role-<role>` |
+| Orders, any status, any date range | Orders created with their original date (`processedAt`) |
+| Line items | Matched to Shopify variants by SKU; unmatched lines are kept as custom lines so totals stay correct |
+| Fees | Extra custom line items |
+| Shipping lines | `shippingLines` |
+| Tax lines + "prices include tax" | `taxLines` + `taxesIncluded` |
+| Coupons / `discount_total` | A fixed-amount order discount named after the first coupon |
+| Payment method + paid date | A successful `SALE` transaction |
+| `completed` status | Order marked fulfilled at your primary location |
+| `refunded` / partial refunds | `REFUNDED` / `PARTIALLY_REFUNDED` financial status, refunded amount kept in the order attributes |
+| Order notes | Appended to the Shopify order note |
+| Woo ids, order key, status, IP, coupons | Order custom attributes + `woo_migration` metafields |
+
+Every imported order is tagged `woo-order-<id>` and every customer `woo-customer-<id>`,
+so the import is traceable and re-runnable.
+
+## Requirements
+
+* Python 3.9+
+* A WooCommerce REST API key (read access is enough):
+  *WooCommerce → Settings → Advanced → REST API → Add key*
+* A Shopify **custom app** Admin API token with the scopes
+  `write_customers`, `write_orders`, `read_products`, `read_locations`
+* Optional, only to import users who never ordered: a WordPress
+  **application password** (*Users → Profile → Application Passwords*)
+
+> Shopify limits how far back apps may create orders. If `orderCreate` rejects old
+> orders on your store, ask Shopify support to enable historical order import for the
+> app, or switch the **Order API** setting to `rest`.
+
+## Install
+
+```bash
+git clone <this repo>
+cd transferdatawordpresstoshopify
+python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+## Run the UI
+
+```bash
+python run_ui.py
+```
+
+1. **Connections** – Woo store URL + key/secret, Shopify domain + Admin token. Hit
+   *Test WooCommerce* and *Test Shopify*; the Shopify test also fills in your location id.
+2. **Options** – how many years of orders (default 4), which statuses, what to include.
+   Leave **Dry run** on for the first pass.
+3. **Product map** – *Build / refresh index* pulls every Shopify variant's SKU. Do this
+   before importing orders, otherwise nothing links to your products.
+4. **Run** – *Start full migration*. Pause/stop any time; the run resumes where it stopped.
+5. **Reports** – summary, failure list, CSV export.
+
+## Run headless
+
+```bash
+python -m woo2shopify.cli init                  # write ~/.woo2shopify/config.json
+python -m woo2shopify.cli test                  # check both connections
+python -m woo2shopify.cli variants              # build the SKU -> variant index
+python -m woo2shopify.cli run --dry-run         # rehearse
+python -m woo2shopify.cli run --years 4         # go
+python -m woo2shopify.cli run --from 2019-01-01 # or an explicit range
+python -m woo2shopify.cli report                # CSVs in ~/.woo2shopify/exports
+```
+
+`customers` and `orders` are also available as standalone subcommands.
+
+## How it stays safe to re-run
+
+* Every customer and order is checkpointed in `~/.woo2shopify/state.sqlite3`
+  (id, Shopify gid, status, error). A second run skips what already succeeded.
+* Before creating an order the tool also searches Shopify for `tag:woo-order-<id>`,
+  so a fresh state file still won't produce duplicates.
+* Customers are deduplicated by email — an "email has already been taken" error is
+  resolved by looking the existing customer up and reusing it.
+* Inventory behaviour defaults to `BYPASS` and receipts are off, so importing history
+  does not move stock levels or email your customers.
+
+## Suggested order of work
+
+1. Products first (you have done this).
+2. `variants` — build the SKU index.
+3. `run --dry-run` over a short range, read the log for `no variant for …` warnings and
+   fix SKUs on the Shopify side.
+4. Customers, then orders, oldest to newest.
+5. Check the Reports page, re-run to retry failures.
+
+## Known limits
+
+* Refunds are recorded as a financial status plus the refunded amount in the order
+  attributes — individual refund transactions and restocks are not recreated.
+* Subscriptions, memberships and other Woo plugin data are out of scope.
+* Order numbers are Shopify's own unless *Keep the WooCommerce order number* is on;
+  the Woo number is always stored in the order attributes and metafields either way.
+* Non-E.164 phone numbers are dropped from the customer record (kept on the address).
+
+## Tests
+
+```bash
+python -m unittest tests.test_end_to_end -v
+```
+
+Runs a full migration against a local mock of both APIs — customer creation, guest
+orders, SKU matching, taxes, discounts, refunds, dry run, resume, and the REST fallback.

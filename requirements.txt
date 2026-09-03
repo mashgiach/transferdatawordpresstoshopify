@@ -1,0 +1,4 @@
+requests>=2.31
+python-dateutil>=2.8
+PyQt5>=5.15.9
+PyQt-Fluent-Widgets[full]>=1.5.0
