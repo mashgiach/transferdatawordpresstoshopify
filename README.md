@@ -159,6 +159,19 @@ python -m woo2shopify.cli report                # CSVs in ~/.woo2shopify/exports
 4. Customers, then orders, oldest to newest.
 5. Check the Reports page, re-run to retry failures.
 
+## Scopes, and why a run can stop immediately
+
+Before touching anything the tool asks Shopify which scopes the token actually carries
+(`currentAppInstallation.accessScopes`) and compares them against what the chosen options
+need — `write_customers`, `write_orders`, `read_products` for SKU matching, `read_locations`
+for fulfilments. A `write_` scope satisfies the matching `read_` requirement. If any are
+missing the run stops in the first second and names them, rather than failing minutes in
+with `Access denied for productVariants field`.
+
+Scopes live on the **app version**. Adding them is not enough: the version has to be
+**released**, and a new token minted afterwards — an existing token keeps the scopes it was
+issued with. *Test Shopify* prints the granted scopes so you can check before starting.
+
 ## Known limits
 
 * Refunds are recorded as a financial status plus the refunded amount in the order

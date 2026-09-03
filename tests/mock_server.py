@@ -110,12 +110,17 @@ VARIANTS = [
 ]
 
 
+DEFAULT_SCOPES = ["write_customers", "write_orders", "read_products", "read_locations"]
+
+
 class Recorder:
     def __init__(self):
         self.customers = []
         self.orders = []
         self.notes = []
         self.existing_emails = {}
+        self.scopes = list(DEFAULT_SCOPES)
+        self.variants = list(VARIANTS)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -199,10 +204,15 @@ class Handler(BaseHTTPRequestHandler):
             return self._send({"data": {"locations": {"edges": [
                 {"node": {"id": "gid://shopify/Location/55", "name": "Main", "isActive": True}}]}},
                 "extensions": cost})
+        if "currentAppInstallation" in query:
+            return self._send({"data": {"currentAppInstallation": {
+                "accessScopes": [{"handle": h} for h in self.recorder.scopes]}}, "extensions": cost})
         if "productVariants(" in query:
+            if "read_products" not in self.recorder.scopes:
+                return self._send({"errors": [{"message": "Access denied for productVariants field."}]})
             return self._send({"data": {"productVariants": {
                 "pageInfo": {"hasNextPage": False, "endCursor": None},
-                "edges": [{"node": v} for v in VARIANTS]}}, "extensions": cost})
+                "edges": [{"node": v} for v in self.recorder.variants]}}, "extensions": cost})
         if "customerCreate(" in query:
             data = variables["input"]
             email = (data.get("email") or "").lower()

@@ -15,31 +15,42 @@ from woo2shopify.config import AppConfig, ShopifyConfig  # noqa: E402
 from woo2shopify.migrator import Migrator, Reporter  # noqa: E402
 
 
-class MigrationTest(unittest.TestCase):
+# One mock server for the whole module; the Shopify client is pointed at it
+# instead of *.myshopify.com. A module-level holder keeps the patched property
+# valid no matter which test class is running.
+SERVER = {"base": ""}
+ShopifyConfig.graphql_url = property(lambda self: f"{SERVER['base']}/admin/api/x/graphql.json")
+ShopifyConfig.rest_url = lambda self, path: f"{SERVER['base']}/admin/api/x/{path.lstrip('/')}"
+
+
+class MockStoreHarness:
+    """Shared setup. Not a TestCase, so its helpers are not collected twice."""
+
     @classmethod
     def setUpClass(cls):
         cls.server, cls.recorder = start_server()
         host, port = cls.server.server_address
-        cls.base = f"http://{host}:{port}"
-
-        # Point the Shopify client at the mock server instead of *.myshopify.com.
-        ShopifyConfig.graphql_url = property(lambda self: f"{MigrationTest.base}/admin/api/x/graphql.json")
-        ShopifyConfig.rest_url = lambda self, path: f"{MigrationTest.base}/admin/api/x/{path.lstrip('/')}"
+        SERVER["base"] = f"http://{host}:{port}"
 
     @classmethod
     def tearDownClass(cls):
         cls.server.shutdown()
+        cls.server.server_close()
 
     def setUp(self):
         # each test starts from an empty destination store
+        from tests.mock_server import DEFAULT_SCOPES, VARIANTS
+
         self.recorder.customers.clear()
         self.recorder.orders.clear()
         self.recorder.notes.clear()
         self.recorder.existing_emails.clear()
+        self.recorder.scopes = list(DEFAULT_SCOPES)
+        self.recorder.variants = list(VARIANTS)
 
     def build(self, **option_overrides):
         config = AppConfig()
-        config.woo.base_url = self.base
+        config.woo.base_url = SERVER["base"]
         config.woo.consumer_key = "ck"
         config.woo.consumer_secret = "cs"
         config.shopify.shop_domain = "test.myshopify.com"
@@ -54,6 +65,8 @@ class MigrationTest(unittest.TestCase):
         migrator = Migrator(config, reporter=reporter, state_path=Path(self.tmp.name))
         return migrator, logs
 
+
+class MigrationTest(MockStoreHarness, unittest.TestCase):
     def test_full_run(self):
         migrator, logs = self.build()
         stats = migrator.run()
@@ -147,6 +160,72 @@ class MigrationTest(unittest.TestCase):
         sam = next(c for c in self.recorder.customers if c.get("email") == "sam@example.com")
         self.assertNotIn("phone", sam)
         self.assertEqual([m for l, m in logs if l == "error"], [])
+        migrator.close()
+
+
+class ScopePreflightTest(MockStoreHarness, unittest.TestCase):
+    """A missing scope must stop the run up front, not minutes in."""
+
+    def test_missing_scope_aborts_before_any_write(self):
+        from woo2shopify.shopify_api import ShopifyError
+
+        self.recorder.scopes = ["read_products", "read_locations"]   # no write access
+        migrator, logs = self.build()
+        with self.assertRaises(ShopifyError) as ctx:
+            migrator.check_scopes()
+        message = str(ctx.exception)
+        self.assertIn("write_customers", message)
+        self.assertIn("write_orders", message)
+        self.assertIn("RELEASE", message)
+        self.assertEqual(self.recorder.orders, [], "nothing may be written when scopes are short")
+        migrator.close()
+
+    def test_run_stops_on_missing_scope(self):
+        from woo2shopify.shopify_api import ShopifyError
+
+        self.recorder.scopes = ["write_customers", "write_orders", "read_locations"]  # no read_products
+        migrator, logs = self.build()
+        with self.assertRaises(ShopifyError) as ctx:
+            migrator.run()
+        self.assertIn("read_products", str(ctx.exception))
+        self.assertEqual(self.recorder.orders, [], "the run must stop before writing anything")
+        migrator.close()
+
+    def test_access_denied_error_names_the_scope(self):
+        """Even if the preflight is bypassed, the API error must be actionable."""
+        from woo2shopify.shopify_api import ShopifyError
+
+        self.recorder.scopes = ["write_customers", "write_orders", "read_locations"]
+        migrator, _logs = self.build()
+        with self.assertRaises(ShopifyError) as ctx:
+            migrator.build_variant_map()
+        message = str(ctx.exception)
+        self.assertIn("Access denied for productVariants", message)
+        self.assertIn("read_products", message)
+        self.assertIn("RELEASE", message)
+        migrator.close()
+
+    def test_write_scope_satisfies_the_read_requirement(self):
+        self.recorder.scopes = ["write_customers", "write_orders", "write_products", "write_locations"]
+        migrator, logs = self.build()
+        self.assertEqual(migrator.check_scopes(), [])
+        migrator.close()
+
+    def test_no_scopes_at_all_is_called_out(self):
+        self.recorder.scopes = []
+        migrator, logs = self.build()
+        with self.assertRaises(Exception):
+            migrator.check_scopes()
+        self.assertTrue(any("no access scopes at all" in m for _l, m in logs))
+        migrator.close()
+
+    def test_empty_catalogue_warns_instead_of_failing_silently(self):
+        self.recorder.variants = []
+        migrator, logs = self.build()
+        migrator.build_variant_map()
+        warnings = " ".join(m for level, m in logs if level == "warn")
+        self.assertIn("No product variants with SKUs", warnings)
+        self.assertIn("different store", warnings)
         migrator.close()
 
 

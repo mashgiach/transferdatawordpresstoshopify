@@ -5,6 +5,7 @@ throttling, retries and the handful of queries/mutations this tool needs.
 from __future__ import annotations
 
 import json
+import re
 import time
 from typing import Any, Callable, Dict, Iterator, List, Optional
 
@@ -34,6 +35,38 @@ AUTH_HELP = (
     "Also check the shop domain is the myshopify one (my-store.myshopify.com), not the "
     "admin.shopify.com URL."
 )
+
+
+# Which access scope each Admin API field needs, for the "Access denied for X
+# field" errors Shopify returns when an app version is missing one.
+SCOPE_FOR_FIELD = {
+    "productVariants": "read_products",
+    "products": "read_products",
+    "customers": "read_customers",
+    "customerCreate": "write_customers",
+    "customerUpdate": "write_customers",
+    "orders": "read_orders",
+    "orderCreate": "write_orders",
+    "orderUpdate": "write_orders",
+    "locations": "read_locations",
+    "shop": "read_products",
+}
+
+
+def scope_hint(message: str) -> str:
+    """Turn 'Access denied for productVariants field' into something actionable."""
+    match = re.search(r"Access denied for (\w+)", message or "")
+    if not match:
+        return ""
+    field = match.group(1)
+    scope = SCOPE_FOR_FIELD.get(field)
+    needed = f"'{scope}'" if scope else "the matching read/write"
+    return (
+        f"\nThe app is missing the {needed} access scope. In the Dev Dashboard open the app, "
+        "add the scopes under the app version's configuration, RELEASE that version, then mint "
+        "a new token — scopes only take effect once the version is released and the token is "
+        "re-issued."
+    )
 
 
 def _describe_http_error(status: int, body: str) -> str:
@@ -146,7 +179,8 @@ class ShopifyClient:
                     time.sleep(delay)
                     delay = min(delay * 2, 60)
                     continue
-                raise ShopifyError("; ".join(e.get("message", "?") for e in errors))
+                joined = "; ".join(e.get("message", "?") for e in errors)
+                raise ShopifyError(joined + scope_hint(joined))
 
             if self.request_delay:
                 time.sleep(self.request_delay)
@@ -219,6 +253,14 @@ class ShopifyClient:
             if node.get("isActive", True):
                 return node["id"]
         return ""
+
+    SCOPES_QUERY = "{ currentAppInstallation { accessScopes { handle } } }"
+
+    def granted_scopes(self) -> List[str]:
+        """The scopes this token actually carries, straight from Shopify."""
+        data = self.graphql(self.SCOPES_QUERY)
+        installation = data.get("currentAppInstallation") or {}
+        return [entry["handle"] for entry in (installation.get("accessScopes") or [])]
 
     # -------------------------------------------------------------- variants
     VARIANTS_QUERY = """

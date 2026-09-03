@@ -112,6 +112,55 @@ class Migrator:
         end = _parse_date(self.opts.date_to) or now + timedelta(days=1)
         return start, end
 
+    # ---------------------------------------------------------------- scopes
+    def required_scopes(self) -> List[str]:
+        """The scopes this particular run needs, given the chosen options."""
+        needed = []
+        if self.opts.migrate_customers or self.opts.include_guest_customers:
+            needed.append("write_customers")
+        if self.opts.migrate_orders:
+            needed.append("write_orders")
+        if self.opts.match_variants and self.opts.match_by != "none":
+            needed.append("read_products")
+        if self.opts.import_fulfillments:
+            needed.append("read_locations")
+        return needed
+
+    @staticmethod
+    def _satisfied(scope: str, granted: set) -> bool:
+        if scope in granted:
+            return True
+        # write_x implies read_x
+        return scope.startswith("read_") and ("write_" + scope[len("read_"):]) in granted
+
+    def check_scopes(self, strict: bool = True) -> List[str]:
+        """Compare granted scopes against what the run needs. Returns the missing ones."""
+        try:
+            granted = set(self.shopify.granted_scopes())
+        except ShopifyError as exc:
+            self.reporter.log(f"Could not read the app's granted scopes ({exc})", "warn")
+            return []
+
+        required = self.required_scopes()
+        missing = [scope for scope in required if not self._satisfied(scope, granted)]
+        if granted:
+            self.reporter.log(f"App scopes granted: {', '.join(sorted(granted))}")
+        else:
+            self.reporter.log("The app has no access scopes at all.", "warn")
+
+        if missing:
+            message = (
+                "The app is missing the access scopes this migration needs: "
+                + ", ".join(missing)
+                + ".\nIn the Dev Dashboard: open the app → add these scopes to the app version → "
+                "RELEASE the version → reinstall/mint a token again. Scopes take effect only "
+                "after the version is released and a new token is issued."
+            )
+            if strict:
+                raise ShopifyError(message)
+            self.reporter.log(message, "error")
+        return missing
+
     # ------------------------------------------------------------ connection
     def test_woo(self) -> Dict[str, Any]:
         return self.woo.test_connection()
@@ -119,8 +168,18 @@ class Migrator:
     def test_shopify(self) -> Dict[str, Any]:
         info = self.shopify.shop_info()
         if not self.location_gid:
-            self.location_gid = self.shopify.primary_location()
-            info["location"] = self.location_gid
+            try:
+                self.location_gid = self.shopify.primary_location()
+                info["location"] = self.location_gid
+            except ShopifyError as exc:
+                self.reporter.log(f"Could not read locations ({exc})", "warn")
+        try:
+            granted = self.shopify.granted_scopes()
+            info["scopes"] = ", ".join(sorted(granted)) or "none"
+            missing = [s for s in self.required_scopes() if not self._satisfied(s, set(granted))]
+            info["missing_scopes"] = ", ".join(missing)
+        except ShopifyError:
+            info["scopes"] = "unknown"
         return info
 
     # -------------------------------------------------------- variant map
@@ -139,7 +198,17 @@ class Migrator:
         if batch:
             total += self._flush_variants(batch)
         self.state.set_meta("variant_map_built_at", datetime.now(timezone.utc).isoformat())
-        self.reporter.log(f"Variant map ready: {self.state.counts()['variants']} SKUs indexed.", "success")
+        indexed = self.state.counts()["variants"]
+        if indexed:
+            self.reporter.log(f"Variant map ready: {indexed} SKUs indexed.", "success")
+        else:
+            self.reporter.log(
+                "No product variants with SKUs found in this Shopify store. Order line items "
+                "will all import as custom lines (totals stay correct, but they will not link "
+                "to products). If your products live in a different store, point the tool at "
+                "that one; if they have no SKUs, set 'Match line items by' to sku_then_title.",
+                "warn",
+            )
         self.reporter.on_progress("variants", total, total)
         return total
 
@@ -440,6 +509,7 @@ class Migrator:
                 f"Connected to Shopify: {info.get('name')} ({info.get('myshopifyDomain')}), "
                 f"currency {info.get('currencyCode')}", "success",
             )
+            self.check_scopes()
             if self.opts.match_variants and self.opts.match_by != "none":
                 if not self.state.counts()["variants"]:
                     self.build_variant_map()

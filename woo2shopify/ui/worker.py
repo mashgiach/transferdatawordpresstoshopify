@@ -9,7 +9,9 @@ from PyQt5.QtCore import QThread, pyqtSignal
 
 from ..config import AppConfig
 from ..migrator import Control, Migrator, Reporter
-from ..oauth import fetch_client_credentials_token, fetch_offline_token
+from ..oauth import OAuthError, fetch_client_credentials_token, fetch_offline_token
+from ..shopify_api import ShopifyError
+from ..woo import WooError
 
 
 class MigrationWorker(QThread):
@@ -57,6 +59,10 @@ class MigrationWorker(QThread):
                 migrator.build_variant_map()
             else:
                 raise ValueError(f"unknown task: {self.task}")
+        except (ShopifyError, WooError, OAuthError) as exc:
+            # these already say what went wrong and what to do about it
+            ok = False
+            self.sig_log.emit(str(exc), "error")
         except Exception as exc:
             ok = False
             self.sig_log.emit(f"{type(exc).__name__}: {exc}", "error")
@@ -91,7 +97,10 @@ class ConnectionTestWorker(QThread):
                 payload = migrator.test_shopify()
                 message = (f"{payload.get('name', 'Store')} ({payload.get('myshopifyDomain', '')}) — "
                            f"currency {payload.get('currencyCode', '?')}, "
-                           f"plan {(payload.get('plan') or {}).get('displayName', '?')}")
+                           f"plan {(payload.get('plan') or {}).get('displayName', '?')}\n"
+                           f"Scopes: {payload.get('scopes', 'unknown')}")
+                if payload.get("missing_scopes"):
+                    message += f"\nMISSING for this run: {payload['missing_scopes']}"
             self.sig_result.emit(self.target, True, message, payload)
         except Exception as exc:
             self.sig_result.emit(self.target, False, f"{type(exc).__name__}: {exc}", payload)
