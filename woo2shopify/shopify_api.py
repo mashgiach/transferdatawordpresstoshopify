@@ -78,6 +78,12 @@ def _describe_http_error(status: int, body: str) -> str:
     return f"HTTP {status}: {body[:800]}"
 
 
+# Shopify throttles order/customer mutations on a separate bucket from the
+# GraphQL query-cost one, and reports it as a userError rather than an HTTP
+# 429 — so it never shows up in the cost-based backoff in graphql() below.
+THROTTLED_MESSAGE_RE = re.compile(r"too many (attempts|requests)|try again later", re.I)
+
+
 class UserError(RuntimeError):
     """A `userErrors` payload from a mutation — a data problem, not transport."""
 
@@ -95,6 +101,10 @@ class UserError(RuntimeError):
     @property
     def messages(self) -> str:
         return "; ".join(self.format_list())
+
+    @property
+    def is_throttled(self) -> bool:
+        return any(THROTTLED_MESSAGE_RE.search(str(e.get("message") or "")) for e in self.errors)
 
 
 class ShopifyClient:
@@ -193,6 +203,39 @@ class ShopifyClient:
         errors = (node or {}).get(key) or []
         if errors:
             raise UserError(errors)
+
+    def mutate(
+        self,
+        query: str,
+        variables: Dict[str, Any],
+        node_key: str,
+        errors_key: str = "userErrors",
+    ) -> Dict[str, Any]:
+        """Run a mutation, retrying it when Shopify throttles order/customer writes.
+
+        This throttle is separate from the GraphQL query-cost bucket graphql()
+        already backs off on — it comes back as a userError ("Too many
+        attempts. Please try again later."), not an HTTP 429, so it needs its
+        own retry loop here rather than being caught upstream.
+        """
+        delay = 3.0
+        for attempt in range(1, self.max_retries + 1):
+            data = self.graphql(query, variables)
+            node = data.get(node_key) or {}
+            try:
+                self.check_user_errors(node, errors_key)
+            except UserError as exc:
+                if exc.is_throttled and attempt < self.max_retries:
+                    self._log(
+                        f"Shopify is rate-limiting {node_key} — retrying in {delay:.0f}s "
+                        f"(attempt {attempt}/{self.max_retries})", "warn",
+                    )
+                    time.sleep(delay)
+                    delay = min(delay * 2, 60)
+                    continue
+                raise
+            return node
+        raise AssertionError("unreachable")  # loop above always returns or raises
 
     # ------------------------------------------------------------------ REST
     def rest(self, method: str, path: str, payload: Optional[Dict[str, Any]] = None,
@@ -333,15 +376,11 @@ class ShopifyClient:
     """
 
     def create_customer(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        data = self.graphql(self.CUSTOMER_CREATE, {"input": payload})
-        node = data.get("customerCreate") or {}
-        self.check_user_errors(node)
+        node = self.mutate(self.CUSTOMER_CREATE, {"input": payload}, "customerCreate")
         return node.get("customer") or {}
 
     def update_customer(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        data = self.graphql(self.CUSTOMER_UPDATE, {"input": payload})
-        node = data.get("customerUpdate") or {}
-        self.check_user_errors(node)
+        node = self.mutate(self.CUSTOMER_UPDATE, {"input": payload}, "customerUpdate")
         return node.get("customer") or {}
 
     # ---------------------------------------------------------------- orders
@@ -368,9 +407,7 @@ class ShopifyClient:
     """
 
     def create_order_graphql(self, order: Dict[str, Any], options: Dict[str, Any]) -> Dict[str, Any]:
-        data = self.graphql(self.ORDER_CREATE, {"order": order, "options": options})
-        node = data.get("orderCreate") or {}
-        self.check_user_errors(node)
+        node = self.mutate(self.ORDER_CREATE, {"order": order, "options": options}, "orderCreate")
         return node.get("order") or {}
 
     def create_order_rest(self, order: Dict[str, Any]) -> Dict[str, Any]:
@@ -393,8 +430,7 @@ class ShopifyClient:
     """
 
     def set_order_note(self, order_gid: str, note: str) -> None:
-        data = self.graphql(self.ORDER_UPDATE, {"input": {"id": order_gid, "note": note[:5000]}})
-        self.check_user_errors(data.get("orderUpdate") or {})
+        self.mutate(self.ORDER_UPDATE, {"input": {"id": order_gid, "note": note[:5000]}}, "orderUpdate")
 
 
 def _escape(value: str) -> str:

@@ -159,6 +159,17 @@ python -m woo2shopify.cli report                # CSVs in ~/.woo2shopify/exports
 4. Customers, then orders, oldest to newest.
 5. Check the Reports page, re-run to retry failures.
 
+## Order-creation throttling
+
+Shopify limits how fast `orderCreate`/`customerCreate` can run on a bucket separate from
+the general GraphQL cost budget, and reports hitting it as a data error —
+`Too many attempts. Please try again later.` — not an HTTP 429. The tool recognises that
+specific message and retries with backoff (up to `Max retries` in Options); a real data
+error (a bad email, an invalid address) is never retried, only this one. If you still see
+it exhaust its retries on a very large import, raise **Extra delay between writes** in
+Options a few hundred ms — it adds a pause after every write and gives the bucket time to
+refill.
+
 ## Location ID
 
 Leave this blank — the tool auto-detects your primary location on *Test Shopify*. If you

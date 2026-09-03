@@ -350,13 +350,9 @@ def build_line_items(
             props = _line_properties(item)
             if props:
                 entry["properties"] = props
-            tax = dec(item.get("total_tax"))
-            if tax:
-                entry["taxLines"] = [{
-                    "title": "Tax",
-                    "priceSet": money_bag(tax, currency),
-                    "rate": float(_effective_rate(tax, dec(item.get("total")))),
-                }]
+            # Tax is carried at the order level (order.get("tax_lines") below), never here too —
+            # Shopify's orderCreate rejects an order that has tax lines on both a line item and
+            # the order itself ("must be associated with either order or line item but not both").
         else:
             entry = {
                 "title": title[:255],
@@ -372,13 +368,7 @@ def build_line_items(
             props = _line_properties(item)
             if props:
                 entry["properties"] = props
-            tax = dec(item.get("total_tax"))
-            if tax:
-                entry["tax_lines"] = [{
-                    "title": "Tax",
-                    "price": money_str(tax),
-                    "rate": float(_effective_rate(tax, dec(item.get("total")))),
-                }]
+            # Same rule for REST: tax stays at the order level only.
 
         items.append(entry)
 
@@ -414,12 +404,6 @@ def build_line_items(
         warnings.append("order had no importable line items — added a single placeholder line")
 
     return items, warnings
-
-
-def _effective_rate(tax: Decimal, base: Decimal) -> Decimal:
-    if base <= 0:
-        return Decimal("0")
-    return (tax / base).quantize(Decimal("0.00001"))
 
 
 def _discount_total(order: Dict[str, Any]) -> Decimal:
