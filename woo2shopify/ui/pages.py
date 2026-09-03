@@ -38,6 +38,7 @@ class ConnectionPage(PageBase):
     testRequested = pyqtSignal(str)
     saveRequested = pyqtSignal()
     oauthRequested = pyqtSignal()
+    mintRequested = pyqtSignal()
 
     def __init__(self, config: AppConfig, parent=None):
         super().__init__(
@@ -73,34 +74,45 @@ class ConnectionPage(PageBase):
 
         card = FormCard("Shopify (destination)", self)
         self.shopDomain = card.add("Shop domain", line_edit("my-store.myshopify.com", shop.shop_domain))
-        self.shopToken = card.add("Admin API access token", line_edit("shpat_...", shop.access_token, password=True),
-                                  "Custom app scopes needed: write_customers, write_orders, read_products, read_locations.")
+        self.shopToken = card.add("Admin API access token", line_edit("filled in by Mint token", shop.access_token, password=True),
+                                  "Leave blank and use the card below if you only have a Client ID and secret. "
+                                  "Scopes needed: write_customers, write_orders, read_products, read_locations.")
         self.apiVersion = card.add("API version", combo(API_VERSIONS, shop.api_version))
+        self.authMode = card.add("Auth mode", combo(["client_credentials", "token"], shop.auth_mode),
+                                 "client_credentials: the tool mints its own tokens from the app's Client ID "
+                                 "and secret, and renews them every 24h. token: use the token above as-is.")
         self.orderApi = card.add("Order API", combo(["graphql", "rest"], shop.order_api),
                                  "GraphQL is the default. Switch to REST if your store rejects orderCreate.")
         self.locationId = card.add("Location ID (optional)", line_edit("gid://shopify/Location/123", shop.location_id),
                                    "Used when marking imported orders fulfilled. Detected automatically if blank.")
         self.add_card(card)
 
-        card = VCard("No Admin API token yet?", self)
+        card = VCard("App credentials (Dev Dashboard apps)", self)
         blurb = BodyLabel(
-            "A store custom app (Settings → Apps and sales channels → Develop apps) hands you a "
-            "shpat_… token directly — paste it above and ignore this card.\n\n"
-            "An app built in the Dev/Partner Dashboard gives you a Client ID and Client secret "
-            "instead; those are not Admin API tokens. Enter them here to exchange them for one. "
-            f"First add {oauth_redirect_uri()} to the app's allowed redirect URLs.", card)
+            "A Dev Dashboard app never shows you an Admin API token — it gives you a Client ID "
+            "and Client secret, which have to be exchanged for one. Enter them here.\n\n"
+            "Mint token: one request, no browser. Works when the app and the store are in the "
+            "same Shopify organization — an app you built and installed on your own store. "
+            "These tokens last 24 hours, so leave Auth mode on client_credentials and the tool "
+            "renews them mid-run by itself.\n\n"
+            "Browser OAuth: for a store outside the app's organization, such as a client's shop. "
+            f"Register {oauth_redirect_uri()} as an allowed redirect URL on the app first. "
+            "It returns a token that does not expire.", card)
         blurb.setWordWrap(True)
         card.add_widget(blurb)
         form = FormBlock(card)
         self.clientId = form.add("Client ID", line_edit("eb43e61e71bf...", shop.client_id))
         self.clientSecret = form.add("Client secret", line_edit("", shop.client_secret, password=True))
-        self.oauthPort = form.add("Callback port", spin(1024, 65535, shop.oauth_port),
+        self.scopes = form.add("Scopes (browser OAuth only)", line_edit(DEFAULT_SCOPES, DEFAULT_SCOPES),
+                               "With client credentials the scopes come from the app version instead.")
+        self.oauthPort = form.add("Callback port (browser OAuth only)", spin(1024, 65535, shop.oauth_port),
                                   "Must match the port in the redirect URL registered on the app.")
-        self.scopes = form.add("Scopes", line_edit(DEFAULT_SCOPES, DEFAULT_SCOPES))
         card.add_widget(form)
-        self.oauthBtn = PushButton(FluentIcon.CERTIFICATE, "Get token via OAuth")
+        self.mintBtn = PrimaryPushButton(FluentIcon.CERTIFICATE, "Mint token")
+        self.oauthBtn = PushButton(FluentIcon.GLOBE, "Browser OAuth instead")
+        self.mintBtn.clicked.connect(self.mintRequested.emit)
         self.oauthBtn.clicked.connect(self.oauthRequested.emit)
-        card.add_widget(row(self.oauthBtn))
+        card.add_widget(row(self.mintBtn, self.oauthBtn))
         self.add_card(card)
 
         self.wooTestBtn = PushButton(FluentIcon.SYNC, "Test WooCommerce")
@@ -123,7 +135,7 @@ class ConnectionPage(PageBase):
         woo.wp_app_password = self.wpPass.text().strip()
 
         shop = config.shopify
-        shop.shop_domain = self.shopDomain.text().strip().replace("https://", "").rstrip("/")
+        shop.shop_domain = self.shopDomain.text().strip()
         shop.access_token = self.shopToken.text().strip()
         shop.api_version = self.apiVersion.currentText()
         shop.order_api = self.orderApi.currentText()
@@ -131,9 +143,14 @@ class ConnectionPage(PageBase):
         shop.client_id = self.clientId.text().strip()
         shop.client_secret = self.clientSecret.text().strip()
         shop.oauth_port = self.oauthPort.value()
+        shop.auth_mode = self.authMode.currentText()
 
-    def set_token(self, token: str) -> None:
+    def set_token(self, token: str, auth_mode: str = "") -> None:
         self.shopToken.setText(token)
+        if auth_mode:
+            index = self.authMode.findText(auth_mode)
+            if index >= 0:
+                self.authMode.setCurrentIndex(index)
 
     def set_location(self, gid: str) -> None:
         if gid and not self.locationId.text().strip():

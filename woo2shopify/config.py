@@ -62,13 +62,23 @@ class ShopifyConfig:
     client_id: str = ""
     client_secret: str = ""
     oauth_port: int = 3456
+    # "client_credentials": mint (and re-mint) tokens from the app credentials.
+    # "token": use access_token as pasted.
+    auth_mode: str = "client_credentials"
+
+    @property
+    def domain(self) -> str:
+        """Accepts a bare handle or a pasted URL; always yields the API host."""
+        from .oauth import normalize_shop
+
+        return normalize_shop(self.shop_domain)
 
     @property
     def graphql_url(self) -> str:
-        return f"https://{self.shop_domain}/admin/api/{self.api_version}/graphql.json"
+        return f"https://{self.domain}/admin/api/{self.api_version}/graphql.json"
 
     def rest_url(self, path: str) -> str:
-        return f"https://{self.shop_domain}/admin/api/{self.api_version}/{path.lstrip('/')}"
+        return f"https://{self.domain}/admin/api/{self.api_version}/{path.lstrip('/')}"
 
 
 @dataclass

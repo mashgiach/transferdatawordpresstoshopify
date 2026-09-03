@@ -11,6 +11,7 @@ from typing import Any, Callable, Dict, Iterator, List, Optional
 import requests
 
 from .config import ShopifyConfig
+from .oauth import OAuthError, TokenSource
 
 RETRY_STATUS = {429, 500, 502, 503, 504}
 
@@ -20,14 +21,18 @@ class ShopifyError(RuntimeError):
 
 
 AUTH_HELP = (
-    "Shopify rejected the Admin API token. The Admin API needs an access token that starts "
-    "with 'shpat_' — an app's Client ID or Client secret from the Dev/Partner Dashboard will "
-    "not work here.\n"
-    "  • Quickest fix: Shopify admin → Settings → Apps and sales channels → Develop apps → "
-    "your app → API credentials → Install app → reveal the Admin API access token.\n"
-    "  • Using a Dev Dashboard app instead? Press 'Get token via OAuth' on the Connections "
-    "page (or run: python -m woo2shopify.cli oauth) to exchange the Client ID/secret for one.\n"
-    "Also check the shop domain is the myshopify one, e.g. my-store.myshopify.com."
+    "Shopify rejected the Admin API token. A Client ID or Client secret is not an access "
+    "token — it has to be exchanged for one.\n"
+    "  • App built in the Dev Dashboard and installed on your own store: set Auth mode to "
+    "'client_credentials' on the Connections page and enter the app's Client ID and secret. "
+    "The tool then mints tokens itself and re-mints them every 24 hours "
+    "(CLI: python -m woo2shopify.cli token).\n"
+    "  • App not in the store's Shopify organization (a client's store): use "
+    "'Get token via browser OAuth' instead (CLI: python -m woo2shopify.cli oauth).\n"
+    "  • An expired or rotated token, or scopes missing from the app version, produces this "
+    "same 401 — re-release the app version after changing scopes.\n"
+    "Also check the shop domain is the myshopify one (my-store.myshopify.com), not the "
+    "admin.shopify.com URL."
 )
 
 
@@ -74,14 +79,20 @@ class ShopifyClient:
         self.session = requests.Session()
         self.session.headers.update(
             {
-                "X-Shopify-Access-Token": cfg.access_token,
                 "Content-Type": "application/json",
                 "Accept": "application/json",
                 "User-Agent": "woo2shopify/1.0",
             }
         )
+        self.tokens = TokenSource(cfg, log=self._log)
         self._available = 1000.0
         self._restore_rate = 50.0
+
+    def _apply_token(self, force: bool = False) -> None:
+        try:
+            self.session.headers["X-Shopify-Access-Token"] = self.tokens.token(force=force)
+        except OAuthError as exc:
+            raise ShopifyError(str(exc)) from exc
 
     # -------------------------------------------------------------- GraphQL
     def _respect_bucket(self) -> None:
@@ -93,9 +104,11 @@ class ShopifyClient:
     def graphql(self, query: str, variables: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         payload = json.dumps({"query": query, "variables": variables or {}})
         delay = 2.0
+        refreshed = False
         for attempt in range(1, self.max_retries + 1):
             self._respect_bucket()
             try:
+                self._apply_token()
                 resp = self.session.post(self.cfg.graphql_url, data=payload, timeout=90)
             except requests.RequestException as exc:
                 self._log(f"Shopify network error ({exc}); retry {attempt}/{self.max_retries}", "warn")
@@ -108,6 +121,11 @@ class ShopifyClient:
                 self._log(f"Shopify HTTP {resp.status_code}; retry in {wait:.0f}s", "warn")
                 time.sleep(wait)
                 delay = min(delay * 2, 60)
+                continue
+            if resp.status_code == 401 and self.tokens.can_refresh and not refreshed:
+                refreshed = True
+                self._log("Token rejected — minting a fresh one and retrying.", "warn")
+                self._apply_token(force=True)
                 continue
             if resp.status_code >= 400:
                 raise ShopifyError(_describe_http_error(resp.status_code, resp.text))
@@ -146,8 +164,10 @@ class ShopifyClient:
              params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         url = self.cfg.rest_url(path)
         delay = 2.0
+        refreshed = False
         for attempt in range(1, self.max_retries + 1):
             try:
+                self._apply_token()
                 resp = self.session.request(
                     method, url, data=json.dumps(payload) if payload is not None else None,
                     params=params, timeout=90,
@@ -162,6 +182,10 @@ class ShopifyClient:
                 wait = float(resp.headers.get("Retry-After") or delay)
                 time.sleep(wait)
                 delay = min(delay * 2, 60)
+                continue
+            if resp.status_code == 401 and self.tokens.can_refresh and not refreshed:
+                refreshed = True
+                self._apply_token(force=True)
                 continue
             if resp.status_code >= 400:
                 raise ShopifyError(f"{method} {path} — " + _describe_http_error(resp.status_code, resp.text))

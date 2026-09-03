@@ -23,7 +23,7 @@ from qfluentwidgets import (
 from ..config import AppConfig, CONFIG_PATH, ensure_dirs
 from ..state import StateStore
 from .pages import ConnectionPage, OptionsPage, ProductsPage, ReportsPage, RunPage
-from .worker import ConnectionTestWorker, MigrationWorker, OAuthWorker
+from .worker import ConnectionTestWorker, MigrationWorker, TokenWorker
 
 
 class MainWindow(FluentWindow):
@@ -33,7 +33,8 @@ class MainWindow(FluentWindow):
         self.config = AppConfig.load()
         self.worker: Optional[MigrationWorker] = None
         self.testWorker: Optional[ConnectionTestWorker] = None
-        self.oauthWorker: Optional[OAuthWorker] = None
+        self.tokenWorker: Optional[TokenWorker] = None
+        self._tokenMode = ""
 
         self.connectionPage = ConnectionPage(self.config, self)
         self.optionsPage = OptionsPage(self.config, self)
@@ -69,7 +70,8 @@ class MainWindow(FluentWindow):
     def _connect_signals(self) -> None:
         self.connectionPage.testRequested.connect(self.test_connection)
         self.connectionPage.saveRequested.connect(self.save_config)
-        self.connectionPage.oauthRequested.connect(self.start_oauth)
+        self.connectionPage.oauthRequested.connect(lambda: self.mint_token("browser"))
+        self.connectionPage.mintRequested.connect(lambda: self.mint_token("client_credentials"))
         self.productsPage.buildRequested.connect(lambda: self.start_task("variants"))
         self.runPage.startRequested.connect(self.start_task)
         self.runPage.pauseRequested.connect(self.toggle_pause)
@@ -116,7 +118,7 @@ class MainWindow(FluentWindow):
         if ok and target == "shopify" and payload.get("location"):
             self.connectionPage.set_location(payload["location"])
 
-    def start_oauth(self) -> None:
+    def mint_token(self, mode: str) -> None:
         config = self.collect_config()
         if not config.shopify.shop_domain:
             self.toast("Missing shop domain", "Enter my-store.myshopify.com first.", "error")
@@ -124,28 +126,38 @@ class MainWindow(FluentWindow):
         if not (config.shopify.client_id and config.shopify.client_secret):
             self.toast("Missing app credentials", "Enter the app's Client ID and Client secret.", "error")
             return
-        if self.oauthWorker and self.oauthWorker.isRunning():
+        if self.tokenWorker and self.tokenWorker.isRunning():
             return
         config.save()
-        self.connectionPage.oauthBtn.setEnabled(False)
+        self._set_token_buttons(False)
         self.switchTo(self.runPage)
-        self.runPage.append_log("Starting the Shopify OAuth flow — approve the app in your browser.", "info")
-        self.oauthWorker = OAuthWorker(config, self.connectionPage.scopes.text().strip(), self)
-        self.oauthWorker.sig_log.connect(self.runPage.append_log)
-        self.oauthWorker.sig_result.connect(self.on_oauth_result)
-        self.oauthWorker.start()
+        self.runPage.append_log(
+            "Approve the app in your browser to continue." if mode == "browser"
+            else "Requesting an access token with the app's credentials…", "info")
+        self._tokenMode = mode
+        self.tokenWorker = TokenWorker(config, mode, self.connectionPage.scopes.text().strip(), self)
+        self.tokenWorker.sig_log.connect(self.runPage.append_log)
+        self.tokenWorker.sig_result.connect(self.on_token_result)
+        self.tokenWorker.start()
 
-    def on_oauth_result(self, ok: bool, token: str, message: str) -> None:
-        self.connectionPage.oauthBtn.setEnabled(True)
+    def _set_token_buttons(self, enabled: bool) -> None:
+        self.connectionPage.mintBtn.setEnabled(enabled)
+        self.connectionPage.oauthBtn.setEnabled(enabled)
+
+    def on_token_result(self, ok: bool, token: str, message: str) -> None:
+        self._set_token_buttons(True)
         self.runPage.append_log(message, "success" if ok else "error")
         if ok:
-            self.connectionPage.set_token(token)
+            # a client-credentials token dies in 24h, so keep the renewing mode on
+            mode = "client_credentials" if getattr(self, "_tokenMode", "") == "client_credentials" else "token"
+            self.connectionPage.set_token(token, mode)
             self.config.shopify.access_token = token
+            self.config.shopify.auth_mode = mode
             self.config.save()
             self.switchTo(self.connectionPage)
-            self.toast("Token saved", "Admin API token filled in and saved. Try 'Test Shopify'.", "success")
+            self.toast("Token ready", message + ". Try 'Test Shopify'.", "success")
         else:
-            self.toast("OAuth failed", message, "error")
+            self.toast("Could not get a token", message, "error")
 
     # --------------------------------------------------------------- running
     def start_task(self, task: str) -> None:

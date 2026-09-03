@@ -8,7 +8,12 @@ from pathlib import Path
 
 from .config import AppConfig, CONFIG_PATH, STATE_PATH, ensure_dirs
 from .migrator import Control, Migrator, Reporter
-from .oauth import DEFAULT_SCOPES, fetch_offline_token, redirect_uri
+from .oauth import (
+    DEFAULT_SCOPES,
+    fetch_client_credentials_token,
+    fetch_offline_token,
+    redirect_uri,
+)
 
 COLOURS = {"info": "", "success": "\033[32m", "warn": "\033[33m", "error": "\033[31m"}
 RESET = "\033[0m"
@@ -44,7 +49,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("init", help="write a blank config file to fill in")
-    oauth = sub.add_parser("oauth", help="exchange an app's Client ID/secret for an Admin API token")
+    sub.add_parser("token", help="mint an Admin API token from the app's Client ID/secret")
+    oauth = sub.add_parser("oauth", help="browser OAuth, for a store outside the app's organization")
     oauth.add_argument("--scopes", default=DEFAULT_SCOPES)
     oauth.add_argument("--port", type=int, help="local callback port (default from config)")
     oauth.add_argument("--no-browser", action="store_true", help="print the URL instead of opening a browser")
@@ -91,7 +97,21 @@ def main(argv=None) -> int:
     reporter = make_reporter()
     migrator = Migrator(config, reporter=reporter, control=Control(), state_path=Path(args.state))
     try:
-        if args.command == "oauth":
+        if args.command == "token":
+            result = fetch_client_credentials_token(
+                config.shopify.shop_domain,
+                config.shopify.client_id,
+                config.shopify.client_secret,
+                log=lambda message, level="info": print(f"[{level}] {message}"),
+            )
+            config.shopify.access_token = str(result["access_token"])
+            config.shopify.auth_mode = "client_credentials"
+            config.save(config_path)
+            print(f"Token saved to {config_path}")
+            print(f"  scopes:  {result['scope'] or 'as configured on the app version'}")
+            print(f"  expires: in {int(result['expires_in']) // 3600}h "
+                  "(re-minted automatically while a migration runs)")
+        elif args.command == "oauth":
             if args.port:
                 config.shopify.oauth_port = args.port
             print(f"Register this redirect URL on the app first: {redirect_uri(config.shopify.oauth_port)}")

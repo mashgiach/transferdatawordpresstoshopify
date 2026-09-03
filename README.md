@@ -36,32 +36,46 @@ so the import is traceable and re-runnable.
 * Python 3.9+
 * A WooCommerce REST API key (read access is enough):
   *WooCommerce → Settings → Advanced → REST API → Add key*
-* A Shopify Admin API access token (`shpat_...`) with the scopes
-  `write_customers`, `write_orders`, `read_products`, `read_locations`
+* A Shopify app (Dev Dashboard) installed on the store, with the scopes
+  `write_customers`, `write_orders`, `read_products`, `read_locations` — see
+  *Getting the Shopify token* below
 * Optional, only to import users who never ordered: a WordPress
   **application password** (*Users → Profile → Application Passwords*)
 
 ### Getting the Shopify token
 
-The Admin API only accepts a token that starts with `shpat_`. An app's **Client ID** and
-**Client secret** are OAuth credentials — pasting either one gives
-`401 [API] Invalid API key or access token`.
+Shopify no longer lets you create admin-made custom apps, and an app built in the
+**Dev Dashboard never displays an Admin API token** — it only shows a Client ID and a
+Client secret. Pasting either of those into the token field gives
+`401 [API] Invalid API key or access token`. They have to be exchanged for a token.
 
-**Easiest — a store custom app:** Shopify admin → *Settings → Apps and sales channels →
-Develop apps → Create an app* → *Configure Admin API scopes* (tick the four above) →
-*Install app* → reveal the **Admin API access token**. Paste it into the Connections page.
+**Your app is installed on your own store (same Shopify organization) — use the client
+credentials grant.** No browser, no redirect URL:
 
-**Already built an app in the Dev/Partner Dashboard?** Exchange its credentials for a token:
+1. Confirm the app version declares the four scopes above and has been released, and that
+   the app is installed on the store.
+2. On the Connections page enter the shop domain (`my-store.myshopify.com`), the Client ID
+   and the Client secret, leave **Auth mode** on `client_credentials`, and press
+   **Mint token**. Headless equivalent: `python -m woo2shopify.cli token`.
 
-1. In the app's configuration, add `http://localhost:3456/callback` to the allowed
-   redirect URLs.
-2. Fill in Client ID and Client secret in the *No Admin API token yet?* card and press
-   **Get token via OAuth** (or run `python -m woo2shopify.cli oauth`).
-3. Approve the install in the browser window that opens. The `shpat_` token is filled in
-   and saved for you.
+These tokens expire after **24 hours**. That is shorter than a large import, so with
+`client_credentials` the tool holds on to the Client ID/secret and re-mints the token
+automatically — before expiry, and again if Shopify ever returns a 401 mid-run. A
+migration spanning days needs no babysitting.
 
-The exchange happens entirely on your machine; the secret is only ever sent to
-`https://<your-shop>.myshopify.com`.
+**The store is outside the app's organization** (a client's shop, a distributed app) —
+the client credentials grant is refused there. Use **Browser OAuth instead**:
+
+1. Add `http://localhost:3456/callback` to the app's allowed redirect URLs.
+2. Press **Browser OAuth instead** (CLI: `python -m woo2shopify.cli oauth`) and approve
+   the install. That returns an offline token which does not expire; set Auth mode to
+   `token` to use it as-is.
+
+Either way the secret only ever travels to `https://<your-shop>.myshopify.com`.
+
+The shop domain field accepts a bare handle (`xzpcy1-7w`), the full myshopify host, or a
+pasted URL. It is not the `admin.shopify.com/store/...` address — for
+`admin.shopify.com/store/xzpcy1-7w` the domain is `xzpcy1-7w.myshopify.com`.
 
 > Shopify limits how far back apps may create orders. If `orderCreate` rejects old
 > orders on your store, ask Shopify support to enable historical order import for the
@@ -95,7 +109,7 @@ python run_ui.py
 
 ```bash
 python -m woo2shopify.cli init                  # write ~/.woo2shopify/config.json
-python -m woo2shopify.cli oauth                 # only if you need to mint an Admin API token
+python -m woo2shopify.cli token                 # mint an Admin API token from the app credentials
 python -m woo2shopify.cli test                  # check both connections
 python -m woo2shopify.cli variants              # build the SKU -> variant index
 python -m woo2shopify.cli run --dry-run         # rehearse
@@ -143,4 +157,5 @@ python -m unittest discover -s tests -t .
 
 Runs a full migration against a local mock of both APIs — customer creation, guest
 orders, SKU matching, taxes, discounts, refunds, dry run, resume, and the REST fallback —
-plus the OAuth token exchange (`tests.test_oauth`).
+plus both token flows, the 24-hour token refresh and the 401 retry
+(`tests.test_oauth`).

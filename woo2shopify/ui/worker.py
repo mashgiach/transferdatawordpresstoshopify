@@ -9,7 +9,7 @@ from PyQt5.QtCore import QThread, pyqtSignal
 
 from ..config import AppConfig
 from ..migrator import Control, Migrator, Reporter
-from ..oauth import fetch_offline_token
+from ..oauth import fetch_client_credentials_token, fetch_offline_token
 
 
 class MigrationWorker(QThread):
@@ -103,27 +103,39 @@ class ConnectionTestWorker(QThread):
                     pass
 
 
-class OAuthWorker(QThread):
-    """Runs the browser-based token exchange without freezing the window."""
+class TokenWorker(QThread):
+    """Mints an Admin API token without freezing the window.
+
+    mode "client_credentials" is a single POST; "browser" runs the redirect flow.
+    """
 
     sig_log = pyqtSignal(str, str)
     sig_result = pyqtSignal(bool, str, str)  # ok, token, message
 
-    def __init__(self, config: AppConfig, scopes: str, parent=None):
+    def __init__(self, config: AppConfig, mode: str = "client_credentials", scopes: str = "", parent=None):
         super().__init__(parent)
         self.config = config
+        self.mode = mode
         self.scopes = scopes
 
     def run(self) -> None:
+        shop = self.config.shopify
+        log = lambda message, level="info": self.sig_log.emit(message, level)  # noqa: E731
         try:
-            result = fetch_offline_token(
-                self.config.shopify.shop_domain,
-                self.config.shopify.client_id,
-                self.config.shopify.client_secret,
-                scopes=self.scopes,
-                port=self.config.shopify.oauth_port,
-                log=lambda message, level="info": self.sig_log.emit(message, level),
-            )
-            self.sig_result.emit(True, result["access_token"], f"Token granted for {result['scope']}")
+            if self.mode == "browser":
+                result = fetch_offline_token(
+                    shop.shop_domain, shop.client_id, shop.client_secret,
+                    scopes=self.scopes, port=shop.oauth_port, log=log,
+                )
+                note = f"Offline token granted for {result['scope']}"
+            else:
+                result = fetch_client_credentials_token(
+                    shop.shop_domain, shop.client_id, shop.client_secret, log=log,
+                )
+                hours = int(result["expires_in"]) // 3600
+                granted = result["scope"] or "the scopes configured on the app"
+                note = (f"Token minted for {granted} — valid ~{hours}h, "
+                        "renewed automatically during a run")
+            self.sig_result.emit(True, str(result["access_token"]), note)
         except Exception as exc:
             self.sig_result.emit(False, "", f"{type(exc).__name__}: {exc}")
