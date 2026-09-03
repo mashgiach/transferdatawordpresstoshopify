@@ -36,10 +36,32 @@ so the import is traceable and re-runnable.
 * Python 3.9+
 * A WooCommerce REST API key (read access is enough):
   *WooCommerce → Settings → Advanced → REST API → Add key*
-* A Shopify **custom app** Admin API token with the scopes
+* A Shopify Admin API access token (`shpat_...`) with the scopes
   `write_customers`, `write_orders`, `read_products`, `read_locations`
 * Optional, only to import users who never ordered: a WordPress
   **application password** (*Users → Profile → Application Passwords*)
+
+### Getting the Shopify token
+
+The Admin API only accepts a token that starts with `shpat_`. An app's **Client ID** and
+**Client secret** are OAuth credentials — pasting either one gives
+`401 [API] Invalid API key or access token`.
+
+**Easiest — a store custom app:** Shopify admin → *Settings → Apps and sales channels →
+Develop apps → Create an app* → *Configure Admin API scopes* (tick the four above) →
+*Install app* → reveal the **Admin API access token**. Paste it into the Connections page.
+
+**Already built an app in the Dev/Partner Dashboard?** Exchange its credentials for a token:
+
+1. In the app's configuration, add `http://localhost:3456/callback` to the allowed
+   redirect URLs.
+2. Fill in Client ID and Client secret in the *No Admin API token yet?* card and press
+   **Get token via OAuth** (or run `python -m woo2shopify.cli oauth`).
+3. Approve the install in the browser window that opens. The `shpat_` token is filled in
+   and saved for you.
+
+The exchange happens entirely on your machine; the secret is only ever sent to
+`https://<your-shop>.myshopify.com`.
 
 > Shopify limits how far back apps may create orders. If `orderCreate` rejects old
 > orders on your store, ask Shopify support to enable historical order import for the
@@ -73,6 +95,7 @@ python run_ui.py
 
 ```bash
 python -m woo2shopify.cli init                  # write ~/.woo2shopify/config.json
+python -m woo2shopify.cli oauth                 # only if you need to mint an Admin API token
 python -m woo2shopify.cli test                  # check both connections
 python -m woo2shopify.cli variants              # build the SKU -> variant index
 python -m woo2shopify.cli run --dry-run         # rehearse
@@ -115,8 +138,9 @@ python -m woo2shopify.cli report                # CSVs in ~/.woo2shopify/exports
 ## Tests
 
 ```bash
-python -m unittest tests.test_end_to_end -v
+python -m unittest discover -s tests -t .
 ```
 
 Runs a full migration against a local mock of both APIs — customer creation, guest
-orders, SKU matching, taxes, discounts, refunds, dry run, resume, and the REST fallback.
+orders, SKU matching, taxes, discounts, refunds, dry run, resume, and the REST fallback —
+plus the OAuth token exchange (`tests.test_oauth`).

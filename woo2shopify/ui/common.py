@@ -20,6 +20,38 @@ from qfluentwidgets import (
 )
 
 
+def add_form_row(form: QFormLayout, parent: QWidget, label: str, widget: QWidget, hint: str = "") -> QWidget:
+    """Label + field, with an optional caption underneath the field."""
+    if hint:
+        box = QWidget(parent)
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+        layout.addWidget(widget)
+        caption = CaptionLabel(hint, box)
+        caption.setWordWrap(True)
+        caption.setTextColor("#7a7a7a", "#9a9a9a")
+        layout.addWidget(caption)
+        form.addRow(BodyLabel(label, parent), box)
+    else:
+        form.addRow(BodyLabel(label, parent), widget)
+    return widget
+
+
+class FormBlock(QWidget):
+    """A bare label/field form, for use inside a card that already has a title."""
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.form = QFormLayout(self)
+        self.form.setContentsMargins(0, 0, 0, 0)
+        self.form.setHorizontalSpacing(18)
+        self.form.setVerticalSpacing(12)
+
+    def add(self, label: str, widget: QWidget, hint: str = "") -> QWidget:
+        return add_form_row(self.form, self, label, widget, hint)
+
+
 class VCard(HeaderCardWidget):
     """Titled card that stacks its contents vertically.
 
@@ -57,19 +89,7 @@ class FormCard(VCard):
         self.body.addLayout(self.form)
 
     def add(self, label: str, widget: QWidget, hint: str = "") -> QWidget:
-        if hint:
-            box = QWidget(self)
-            layout = QVBoxLayout(box)
-            layout.setContentsMargins(0, 0, 0, 0)
-            layout.setSpacing(2)
-            layout.addWidget(widget)
-            caption = CaptionLabel(hint, box)
-            caption.setWordWrap(True)
-            caption.setTextColor("#7a7a7a", "#9a9a9a")
-            layout.addWidget(caption)
-            self.form.addRow(BodyLabel(label, self), box)
-        else:
-            self.form.addRow(BodyLabel(label, self), widget)
+        add_form_row(self.form, self, label, widget, hint)
         return widget
 
     def add_row(self, widget: QWidget) -> QWidget:
@@ -145,6 +165,8 @@ class PageBase(ScrollArea):
 
         self.setWidget(self.view)
         self.setWidgetResizable(True)
+        # cards wrap to the window instead of pushing the page sideways
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.enableTransparentBackground()
 
     def add_card(self, card: QWidget) -> QWidget:

@@ -23,7 +23,7 @@ from qfluentwidgets import (
 from ..config import AppConfig, CONFIG_PATH, ensure_dirs
 from ..state import StateStore
 from .pages import ConnectionPage, OptionsPage, ProductsPage, ReportsPage, RunPage
-from .worker import ConnectionTestWorker, MigrationWorker
+from .worker import ConnectionTestWorker, MigrationWorker, OAuthWorker
 
 
 class MainWindow(FluentWindow):
@@ -33,6 +33,7 @@ class MainWindow(FluentWindow):
         self.config = AppConfig.load()
         self.worker: Optional[MigrationWorker] = None
         self.testWorker: Optional[ConnectionTestWorker] = None
+        self.oauthWorker: Optional[OAuthWorker] = None
 
         self.connectionPage = ConnectionPage(self.config, self)
         self.optionsPage = OptionsPage(self.config, self)
@@ -68,6 +69,7 @@ class MainWindow(FluentWindow):
     def _connect_signals(self) -> None:
         self.connectionPage.testRequested.connect(self.test_connection)
         self.connectionPage.saveRequested.connect(self.save_config)
+        self.connectionPage.oauthRequested.connect(self.start_oauth)
         self.productsPage.buildRequested.connect(lambda: self.start_task("variants"))
         self.runPage.startRequested.connect(self.start_task)
         self.runPage.pauseRequested.connect(self.toggle_pause)
@@ -113,6 +115,37 @@ class MainWindow(FluentWindow):
         self.runPage.append_log(message, "success" if ok else "error")
         if ok and target == "shopify" and payload.get("location"):
             self.connectionPage.set_location(payload["location"])
+
+    def start_oauth(self) -> None:
+        config = self.collect_config()
+        if not config.shopify.shop_domain:
+            self.toast("Missing shop domain", "Enter my-store.myshopify.com first.", "error")
+            return
+        if not (config.shopify.client_id and config.shopify.client_secret):
+            self.toast("Missing app credentials", "Enter the app's Client ID and Client secret.", "error")
+            return
+        if self.oauthWorker and self.oauthWorker.isRunning():
+            return
+        config.save()
+        self.connectionPage.oauthBtn.setEnabled(False)
+        self.switchTo(self.runPage)
+        self.runPage.append_log("Starting the Shopify OAuth flow — approve the app in your browser.", "info")
+        self.oauthWorker = OAuthWorker(config, self.connectionPage.scopes.text().strip(), self)
+        self.oauthWorker.sig_log.connect(self.runPage.append_log)
+        self.oauthWorker.sig_result.connect(self.on_oauth_result)
+        self.oauthWorker.start()
+
+    def on_oauth_result(self, ok: bool, token: str, message: str) -> None:
+        self.connectionPage.oauthBtn.setEnabled(True)
+        self.runPage.append_log(message, "success" if ok else "error")
+        if ok:
+            self.connectionPage.set_token(token)
+            self.config.shopify.access_token = token
+            self.config.save()
+            self.switchTo(self.connectionPage)
+            self.toast("Token saved", "Admin API token filled in and saved. Try 'Test Shopify'.", "success")
+        else:
+            self.toast("OAuth failed", message, "error")
 
     # --------------------------------------------------------------- running
     def start_task(self, task: str) -> None:

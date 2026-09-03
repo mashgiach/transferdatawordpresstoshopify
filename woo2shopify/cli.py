@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .config import AppConfig, CONFIG_PATH, STATE_PATH, ensure_dirs
 from .migrator import Control, Migrator, Reporter
+from .oauth import DEFAULT_SCOPES, fetch_offline_token, redirect_uri
 
 COLOURS = {"info": "", "success": "\033[32m", "warn": "\033[33m", "error": "\033[31m"}
 RESET = "\033[0m"
@@ -43,6 +44,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("init", help="write a blank config file to fill in")
+    oauth = sub.add_parser("oauth", help="exchange an app's Client ID/secret for an Admin API token")
+    oauth.add_argument("--scopes", default=DEFAULT_SCOPES)
+    oauth.add_argument("--port", type=int, help="local callback port (default from config)")
+    oauth.add_argument("--no-browser", action="store_true", help="print the URL instead of opening a browser")
     sub.add_parser("test", help="check both API connections")
     sub.add_parser("variants", help="(re)build the Shopify SKU -> variant map")
     sub.add_parser("customers", help="migrate customers only")
@@ -86,7 +91,23 @@ def main(argv=None) -> int:
     reporter = make_reporter()
     migrator = Migrator(config, reporter=reporter, control=Control(), state_path=Path(args.state))
     try:
-        if args.command == "test":
+        if args.command == "oauth":
+            if args.port:
+                config.shopify.oauth_port = args.port
+            print(f"Register this redirect URL on the app first: {redirect_uri(config.shopify.oauth_port)}")
+            result = fetch_offline_token(
+                config.shopify.shop_domain,
+                config.shopify.client_id,
+                config.shopify.client_secret,
+                scopes=args.scopes,
+                port=config.shopify.oauth_port,
+                open_browser=not args.no_browser,
+                log=lambda message, level="info": print(f"[{level}] {message}"),
+            )
+            config.shopify.access_token = result["access_token"]
+            config.save(config_path)
+            print(f"Access token saved to {config_path} (scopes: {result['scope']})")
+        elif args.command == "test":
             shop = migrator.test_shopify()
             print(f"Shopify OK: {shop.get('name')} ({shop.get('myshopifyDomain')})")
             woo = migrator.test_woo()

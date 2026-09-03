@@ -57,6 +57,11 @@ class ShopifyConfig:
     api_version: str = DEFAULT_API_VERSION
     location_id: str = ""          # gid://shopify/Location/... (auto-detected if blank)
     order_api: str = "graphql"     # "graphql" or "rest"
+    # Only needed when the access token is obtained by OAuth from a
+    # Dev/Partner Dashboard app rather than pasted from a store custom app.
+    client_id: str = ""
+    client_secret: str = ""
+    oauth_port: int = 3456
 
     @property
     def graphql_url(self) -> str:

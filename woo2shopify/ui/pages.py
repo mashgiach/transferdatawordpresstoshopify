@@ -25,7 +25,8 @@ from qfluentwidgets import (
 )
 
 from ..config import APP_DIR, DEFAULT_ORDER_STATUSES, AppConfig
-from .common import FormCard, PageBase, VCard, checkbox, combo, line_edit, row, spin
+from ..oauth import DEFAULT_SCOPES, redirect_uri as oauth_redirect_uri
+from .common import FormBlock, FormCard, PageBase, VCard, checkbox, combo, line_edit, row, spin
 
 API_VERSIONS = ["2026-01", "2025-10", "2025-07", "2025-04", "2025-01", "2024-10", "2024-07"]
 LEVEL_COLOURS = {"success": "#2e9e57", "warn": "#c8860d", "error": "#d64545"}
@@ -36,6 +37,7 @@ DARK_LEVEL_COLOURS = {"success": "#5fd08a", "warn": "#e0a83c", "error": "#ef6f6f
 class ConnectionPage(PageBase):
     testRequested = pyqtSignal(str)
     saveRequested = pyqtSignal()
+    oauthRequested = pyqtSignal()
 
     def __init__(self, config: AppConfig, parent=None):
         super().__init__(
@@ -80,6 +82,27 @@ class ConnectionPage(PageBase):
                                    "Used when marking imported orders fulfilled. Detected automatically if blank.")
         self.add_card(card)
 
+        card = VCard("No Admin API token yet?", self)
+        blurb = BodyLabel(
+            "A store custom app (Settings → Apps and sales channels → Develop apps) hands you a "
+            "shpat_… token directly — paste it above and ignore this card.\n\n"
+            "An app built in the Dev/Partner Dashboard gives you a Client ID and Client secret "
+            "instead; those are not Admin API tokens. Enter them here to exchange them for one. "
+            f"First add {oauth_redirect_uri()} to the app's allowed redirect URLs.", card)
+        blurb.setWordWrap(True)
+        card.add_widget(blurb)
+        form = FormBlock(card)
+        self.clientId = form.add("Client ID", line_edit("eb43e61e71bf...", shop.client_id))
+        self.clientSecret = form.add("Client secret", line_edit("", shop.client_secret, password=True))
+        self.oauthPort = form.add("Callback port", spin(1024, 65535, shop.oauth_port),
+                                  "Must match the port in the redirect URL registered on the app.")
+        self.scopes = form.add("Scopes", line_edit(DEFAULT_SCOPES, DEFAULT_SCOPES))
+        card.add_widget(form)
+        self.oauthBtn = PushButton(FluentIcon.CERTIFICATE, "Get token via OAuth")
+        self.oauthBtn.clicked.connect(self.oauthRequested.emit)
+        card.add_widget(row(self.oauthBtn))
+        self.add_card(card)
+
         self.wooTestBtn = PushButton(FluentIcon.SYNC, "Test WooCommerce")
         self.shopTestBtn = PushButton(FluentIcon.SYNC, "Test Shopify")
         self.saveBtn = PrimaryPushButton(FluentIcon.SAVE, "Save settings")
@@ -105,6 +128,12 @@ class ConnectionPage(PageBase):
         shop.api_version = self.apiVersion.currentText()
         shop.order_api = self.orderApi.currentText()
         shop.location_id = self.locationId.text().strip()
+        shop.client_id = self.clientId.text().strip()
+        shop.client_secret = self.clientSecret.text().strip()
+        shop.oauth_port = self.oauthPort.value()
+
+    def set_token(self, token: str) -> None:
+        self.shopToken.setText(token)
 
     def set_location(self, gid: str) -> None:
         if gid and not self.locationId.text().strip():

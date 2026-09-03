@@ -19,6 +19,27 @@ class ShopifyError(RuntimeError):
     pass
 
 
+AUTH_HELP = (
+    "Shopify rejected the Admin API token. The Admin API needs an access token that starts "
+    "with 'shpat_' — an app's Client ID or Client secret from the Dev/Partner Dashboard will "
+    "not work here.\n"
+    "  • Quickest fix: Shopify admin → Settings → Apps and sales channels → Develop apps → "
+    "your app → API credentials → Install app → reveal the Admin API access token.\n"
+    "  • Using a Dev Dashboard app instead? Press 'Get token via OAuth' on the Connections "
+    "page (or run: python -m woo2shopify.cli oauth) to exchange the Client ID/secret for one.\n"
+    "Also check the shop domain is the myshopify one, e.g. my-store.myshopify.com."
+)
+
+
+def _describe_http_error(status: int, body: str) -> str:
+    if status in (401, 403):
+        return f"HTTP {status}: {body[:300]}\n{AUTH_HELP}"
+    if status == 404:
+        return (f"HTTP 404: {body[:300]}\nCheck the shop domain and the API version — "
+                "a version Shopify has retired returns 404.")
+    return f"HTTP {status}: {body[:800]}"
+
+
 class UserError(RuntimeError):
     """A `userErrors` payload from a mutation — a data problem, not transport."""
 
@@ -89,7 +110,7 @@ class ShopifyClient:
                 delay = min(delay * 2, 60)
                 continue
             if resp.status_code >= 400:
-                raise ShopifyError(f"HTTP {resp.status_code}: {resp.text[:800]}")
+                raise ShopifyError(_describe_http_error(resp.status_code, resp.text))
 
             body = resp.json()
             cost = (body.get("extensions") or {}).get("cost") or {}
@@ -143,7 +164,7 @@ class ShopifyClient:
                 delay = min(delay * 2, 60)
                 continue
             if resp.status_code >= 400:
-                raise ShopifyError(f"HTTP {resp.status_code} {method} {path}: {resp.text[:800]}")
+                raise ShopifyError(f"{method} {path} — " + _describe_http_error(resp.status_code, resp.text))
 
             limit = resp.headers.get("X-Shopify-Shop-Api-Call-Limit", "")
             if limit and "/" in limit:
