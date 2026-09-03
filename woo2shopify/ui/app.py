@@ -21,6 +21,7 @@ from qfluentwidgets import (
 )
 
 from ..config import AppConfig, CONFIG_PATH, ensure_dirs
+from ..oauth import describe_token_problem
 from ..state import StateStore
 from .pages import ConnectionPage, OptionsPage, ProductsPage, ReportsPage, RunPage
 from .worker import ConnectionTestWorker, MigrationWorker, TokenWorker
@@ -95,9 +96,22 @@ class MainWindow(FluentWindow):
         if need_woo and not (config.woo.base_url and config.woo.consumer_key and config.woo.consumer_secret):
             self.toast("Missing WooCommerce credentials", "Fill in the store URL, consumer key and secret.", "error")
             return False
-        if need_shopify and not (config.shopify.shop_domain and config.shopify.access_token):
-            self.toast("Missing Shopify credentials", "Fill in the shop domain and Admin API token.", "error")
-            return False
+        if need_shopify:
+            shop = config.shopify
+            has_credentials = shop.access_token or (
+                shop.auth_mode == "client_credentials" and shop.client_id and shop.client_secret
+            )
+            if not (shop.shop_domain and has_credentials):
+                self.toast(
+                    "Missing Shopify credentials",
+                    "Fill in the shop domain, then either paste an Admin API token or enter the "
+                    "app's Client ID and secret and press Mint token.", "error")
+                return False
+            if shop.auth_mode != "client_credentials":
+                problem = describe_token_problem(shop.access_token)
+                if problem:
+                    self.toast("That is not an Admin API token", problem, "error")
+                    return False
         return True
 
     # ------------------------------------------------------------ connection

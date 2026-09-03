@@ -42,6 +42,32 @@ class OAuthError(RuntimeError):
 
 
 TOKEN_PATH = "/admin/oauth/access_token"
+
+# Credentials that look like an Admin API token but are not one. Shopify answers
+# all of them with the same opaque 401, so name them up front instead.
+WRONG_TOKEN_PREFIXES = {
+    "shpss_": (
+        "an app Client secret. Secrets are exchanged for a token, not used as one — "
+        "put it in the Client secret field and press Mint token."
+    ),
+    "atkn_": (
+        "an App Automation Token. Those authenticate Shopify CLI for deploying app "
+        "versions in CI/CD and cannot call the Admin API at all — no store data, no "
+        "customers, no orders. Use the app's Client ID and secret with Mint token instead."
+    ),
+    "shpca_": "a Customer Account API token, which cannot read Admin API data.",
+    "shppa_": "a Partner API token, which only reaches the Partner API.",
+    "prtapi_": "a Partner API token, which only reaches the Partner API.",
+}
+
+
+def describe_token_problem(token: str) -> str:
+    """Name a recognisably wrong credential, or '' if it could be a real token."""
+    value = (token or "").strip()
+    for prefix, what in WRONG_TOKEN_PREFIXES.items():
+        if value.startswith(prefix):
+            return f"That token starts with '{prefix}', so it is {what}"
+    return ""
 REFRESH_MARGIN = 120  # re-mint this many seconds before the token actually dies
 
 
@@ -163,6 +189,9 @@ class TokenSource:
                     "set the auth mode to 'client_credentials' and enter the app's Client ID "
                     "and secret."
                 )
+            problem = describe_token_problem(self.config.access_token)
+            if problem:
+                raise OAuthError(problem)
             return self.config.access_token
 
         with self._lock:

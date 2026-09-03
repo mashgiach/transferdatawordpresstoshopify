@@ -170,6 +170,36 @@ class ClientCredentialsTest(unittest.TestCase):
         self.assertIn("No Shopify Admin API token", str(ctx.exception))
 
 
+class WrongCredentialTest(unittest.TestCase):
+    """Shopify answers every wrong credential type with the same opaque 401."""
+
+    def test_automation_token_is_named(self):
+        problem = oauth.describe_token_problem("atkn_9892da635306f1d23c1ccd04005")
+        self.assertIn("App Automation Token", problem)
+        self.assertIn("cannot call the Admin API", problem)
+
+    def test_client_secret_is_named(self):
+        self.assertIn("Client secret", oauth.describe_token_problem("shpss_64e4eef8669"))
+
+    def test_plausible_tokens_pass(self):
+        # client-credentials tokens are bare hex, so only known prefixes may be flagged
+        self.assertEqual(oauth.describe_token_problem("shpat_realtoken"), "")
+        self.assertEqual(oauth.describe_token_problem("f85632530bf277ec9ac6f649fc327f17"), "")
+        self.assertEqual(oauth.describe_token_problem(""), "")
+
+    def test_client_refuses_before_making_a_request(self):
+        from woo2shopify.config import ShopifyConfig
+        from woo2shopify.shopify_api import ShopifyClient, ShopifyError
+
+        cfg = ShopifyConfig(shop_domain=SHOP, access_token="atkn_9892da6353", auth_mode="token")
+        client = ShopifyClient(cfg, max_retries=3)
+        with mock.patch.object(client.session, "post") as post:
+            with self.assertRaises(ShopifyError) as ctx:
+                client.graphql("{ shop { name } }")
+        post.assert_not_called()
+        self.assertIn("App Automation Token", str(ctx.exception))
+
+
 class ClientRefreshTest(unittest.TestCase):
     """A token that expires mid-migration must not end the run."""
 

@@ -73,6 +73,19 @@ the client credentials grant is refused there. Use **Browser OAuth instead**:
 
 Either way the secret only ever travels to `https://<your-shop>.myshopify.com`.
 
+**Credentials that are not Admin API tokens.** Shopify rejects all of these with the same
+opaque 401, so the tool names them instead of letting you guess:
+
+| Starts with | What it actually is |
+|---|---|
+| `atkn_` | An **App Automation Token** — authenticates Shopify CLI for deploying app versions in CI/CD. It cannot call the Admin API at all. |
+| `shpss_` | The app's **Client secret** — exchange it for a token, don't use it as one. |
+| `shpca_` | A Customer Account API token. |
+| `shppa_` / `prtapi_` | A Partner API token. |
+
+A valid token from the client credentials grant may look like plain hex with no prefix, so
+absence of `shpat_` is not itself a problem.
+
 The shop domain field accepts a bare handle (`xzpcy1-7w`), the full myshopify host, or a
 pasted URL. It is not the `admin.shopify.com/store/...` address — for
 `admin.shopify.com/store/xzpcy1-7w` the domain is `xzpcy1-7w.myshopify.com`.
