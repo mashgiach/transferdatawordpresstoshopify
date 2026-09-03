@@ -49,29 +49,34 @@ Shopify no longer lets you create admin-made custom apps, and an app built in th
 Client secret. Pasting either of those into the token field gives
 `401 [API] Invalid API key or access token`. They have to be exchanged for a token.
 
-**Your app is installed on your own store (same Shopify organization) — use the client
-credentials grant.** No browser, no redirect URL:
+**Use browser OAuth (the authorization code grant) — this is the path for a live store.**
 
-1. Confirm the app version declares the four scopes above and has been released, and that
-   the app is installed on the store.
-2. On the Connections page enter the shop domain (`my-store.myshopify.com`), the Client ID
-   and the Client secret, leave **Auth mode** on `client_credentials`, and press
-   **Mint token**. Headless equivalent: `python -m woo2shopify.cli token`.
+1. In the Dev Dashboard, set the app's **distribution** to **Custom distribution** for your
+   store, so it may be installed there.
+2. Add `http://localhost:3456/callback` to the app's **allowed redirect URLs**, exactly,
+   port included. If Shopify insists the redirect and app URL hosts match, set the app URL
+   to `http://localhost:3456` too.
+3. Enter the shop domain, Client ID and Client secret on the Connections page and press
+   **Browser OAuth (any store)** (CLI: `python -m woo2shopify.cli oauth`). Approve the
+   install in the browser.
 
-These tokens expire after **24 hours**. That is shorter than a large import, so with
-`client_credentials` the tool holds on to the Client ID/secret and re-mints the token
-automatically — before expiry, and again if Shopify ever returns a 401 mid-run. A
-migration spanning days needs no babysitting.
+Shopify may return a permanent token, or a short-lived one (about an hour) plus a 90-day
+refresh token. Both are handled: the tool stores whatever it gets, refreshes ahead of
+expiry and again if a request comes back 401, and writes the renewed token back to the
+config so a migration resumed the next day still works. Refresh tokens rotate, and the new
+one is kept.
 
-**The store is outside the app's organization** (a client's shop, a distributed app) —
-the client credentials grant is refused there. Use **Browser OAuth instead**:
-
-1. Add `http://localhost:3456/callback` to the app's allowed redirect URLs.
-2. Press **Browser OAuth instead** (CLI: `python -m woo2shopify.cli oauth`) and approve
-   the install. That returns an offline token which does not expire; set Auth mode to
-   `token` to use it as-is.
+**Mint token (client credentials) only works on development stores** created in the Dev
+Dashboard under the same organization as the app. On a paid or trial store Shopify answers
+`shop_not_permitted`, and no app setting changes that — use browser OAuth instead. Where it
+does apply it is one request with no browser, and the 24-hour tokens are re-minted
+automatically.
 
 Either way the secret only ever travels to `https://<your-shop>.myshopify.com`.
+
+The shop domain field accepts a bare handle (`xzpcy1-7w`), the full myshopify host, or a
+pasted URL. It is not the `admin.shopify.com/store/...` address — for
+`admin.shopify.com/store/xzpcy1-7w` the domain is `xzpcy1-7w.myshopify.com`.
 
 **Credentials that are not Admin API tokens.** Shopify rejects all of these with the same
 opaque 401, so the tool names them instead of letting you guess:
@@ -122,7 +127,8 @@ python run_ui.py
 
 ```bash
 python -m woo2shopify.cli init                  # write ~/.woo2shopify/config.json
-python -m woo2shopify.cli token                 # mint an Admin API token from the app credentials
+python -m woo2shopify.cli oauth                 # get an Admin API token (browser, any store)
+python -m woo2shopify.cli token                 # client credentials variant (dev stores only)
 python -m woo2shopify.cli test                  # check both connections
 python -m woo2shopify.cli variants              # build the SKU -> variant index
 python -m woo2shopify.cli run --dry-run         # rehearse
@@ -170,5 +176,5 @@ python -m unittest discover -s tests -t .
 
 Runs a full migration against a local mock of both APIs — customer creation, guest
 orders, SKU matching, taxes, discounts, refunds, dry run, resume, and the REST fallback —
-plus both token flows, the 24-hour token refresh and the 401 retry
-(`tests.test_oauth`).
+plus both token flows, token refresh and rotation, the 401 retry and the
+wrong-credential guards (`tests.test_oauth`).

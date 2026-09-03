@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import re
 import secrets
 import threading
 import time
@@ -122,19 +123,35 @@ def fetch_client_credentials_token(
     )
     if response.status_code >= 400:
         raise OAuthError(_explain_grant_failure(response.status_code, response.text))
-    payload = response.json()
-    token = payload.get("access_token")
-    if not token:
-        raise OAuthError(f"No access_token in the response: {str(payload)[:300]}")
-    return {
-        "access_token": token,
-        "scope": payload.get("scope", ""),
-        "expires_in": int(payload.get("expires_in") or 86399),
-    }
+    grant = read_grant(response.json())
+    grant["expires_in"] = int(grant["expires_in"]) or 86399
+    return grant
+
+
+def clean_error_body(body: str) -> str:
+    """Shopify serves OAuth failures as HTML pages; keep only the useful part."""
+    text = body or ""
+    if "<html" in text.lower():
+        match = re.search(r"<title>(.*?)</title>", text, re.S | re.I)
+        return (match.group(1).strip() if match else "HTML error page")[:200]
+    return text[:300]
 
 
 def _explain_grant_failure(status: int, body: str) -> str:
-    detail = body[:300]
+    detail = clean_error_body(body)
+    if "shop_not_permitted" in (body or ""):
+        return (
+            "Shopify says shop_not_permitted: the client credentials grant is not allowed on "
+            "this store.\n"
+            "That grant only reaches development stores created in the Dev Dashboard under the "
+            "same organization as the app. A paid or trial store, or a store from another "
+            "organization, always fails this way — no app setting changes it.\n"
+            "Use the browser OAuth flow (authorization code grant) instead:\n"
+            "  1. Set the app's distribution to Custom distribution for this store.\n"
+            f"  2. Add {redirect_uri()} to the app's allowed redirect URLs (and set the app URL "
+            "to the same host if Shopify insists they match).\n"
+            "  3. Press 'Browser OAuth instead' and approve the install."
+        )
     if status in (400, 401, 403):
         return (
             f"Shopify refused the client credentials grant (HTTP {status}): {detail}\n"
@@ -148,21 +165,93 @@ def _explain_grant_failure(status: int, body: str) -> str:
     return f"Client credentials grant failed (HTTP {status}): {detail}"
 
 
-class TokenSource:
-    """Supplies the Admin API token, re-minting it when it is about to expire.
+def read_grant(payload: Dict[str, object]) -> Dict[str, object]:
+    """Normalise a token response.
 
-    Client-credentials tokens live 24 hours, which is shorter than a large
-    migration, so the client asks this for a token on every request rather than
-    caching one at startup.
+    Shopify may return a permanent offline token (no expiry) or an expiring one
+    with a refresh token. Both are accepted; `expires_in` of 0 means the token
+    does not expire.
+    """
+    token = payload.get("access_token")
+    if not token:
+        raise OAuthError(f"No access_token in the response: {str(payload)[:300]}")
+    return {
+        "access_token": str(token),
+        "scope": str(payload.get("scope") or ""),
+        "expires_in": int(payload.get("expires_in") or 0),
+        "refresh_token": str(payload.get("refresh_token") or ""),
+        "refresh_token_expires_in": int(payload.get("refresh_token_expires_in") or 0),
+    }
+
+
+def refresh_access_token(
+    shop_domain: str,
+    client_id: str,
+    client_secret: str,
+    refresh_token: str,
+    log: Optional[Callable[[str, str], None]] = None,
+) -> Dict[str, object]:
+    """Trade a refresh token for a fresh access token."""
+    log = log or (lambda message, level="info": None)
+    shop = normalize_shop(shop_domain)
+    if not refresh_token:
+        raise OAuthError("No refresh token stored — run the browser OAuth flow again.")
+    log("Refreshing the Shopify access token…", "info")
+    response = requests.post(
+        f"https://{shop}{TOKEN_PATH}",
+        data={
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+        },
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        timeout=30,
+    )
+    if response.status_code >= 400:
+        raise OAuthError(
+            f"Token refresh failed (HTTP {response.status_code}): {clean_error_body(response.text)}\n"
+            "Refresh tokens last 90 days — if it has lapsed, run the browser OAuth flow again."
+        )
+    return read_grant(response.json())
+
+
+def apply_grant(shopify_config, grant: Dict[str, object], auth_mode: str = "") -> None:
+    """Write a token response into a ShopifyConfig, expiries included."""
+    now = time.time()
+    shopify_config.access_token = str(grant["access_token"])
+    expires_in = int(grant.get("expires_in") or 0)
+    shopify_config.token_expires_at = now + expires_in if expires_in else 0.0
+    refresh = str(grant.get("refresh_token") or "")
+    if refresh:
+        shopify_config.refresh_token = refresh
+        refresh_ttl = int(grant.get("refresh_token_expires_in") or 0)
+        shopify_config.refresh_token_expires_at = now + refresh_ttl if refresh_ttl else 0.0
+    if auth_mode:
+        shopify_config.auth_mode = auth_mode
+
+
+class TokenSource:
+    """Supplies the Admin API token, renewing it however this config allows.
+
+    Three cases, because Shopify has three:
+      * client credentials — mint a fresh 24-hour token whenever one is needed;
+      * an expiring token plus a refresh token (authorization code grant) —
+        refresh before it lapses, and again if a request comes back 401;
+      * a plain long-lived token — hand it over as-is.
+
+    A renewed token is written back to the config, so a migration resumed
+    tomorrow does not need the browser flow again.
     """
 
-    def __init__(self, config, log: Optional[Callable[[str, str], None]] = None):
+    def __init__(self, config, log: Optional[Callable[[str, str], None]] = None, save=None):
         self.config = config
         self._log = log or (lambda message, level="info": None)
-        self._token = ""
-        self._expires_at = 0.0
-        self._scope = ""
+        self._save = save
         self._lock = threading.Lock()
+        self._minted = ""
+        self._minted_expires_at = 0.0
+        self._scope = ""
 
     @property
     def uses_client_credentials(self) -> bool:
@@ -174,43 +263,94 @@ class TokenSource:
         )
 
     @property
+    def uses_refresh_token(self) -> bool:
+        cfg = self.config
+        return bool(
+            not self.uses_client_credentials
+            and getattr(cfg, "refresh_token", "")
+            and cfg.client_id
+            and cfg.client_secret
+        )
+
+    @property
     def can_refresh(self) -> bool:
-        return self.uses_client_credentials
+        return self.uses_client_credentials or self.uses_refresh_token
 
     @property
     def scope(self) -> str:
         return self._scope
 
     def token(self, force: bool = False) -> str:
-        if not self.uses_client_credentials:
-            if not self.config.access_token:
-                raise OAuthError(
-                    "No Shopify Admin API token configured. Either paste an access token, or "
-                    "set the auth mode to 'client_credentials' and enter the app's Client ID "
-                    "and secret."
-                )
-            problem = describe_token_problem(self.config.access_token)
-            if problem:
-                raise OAuthError(problem)
-            return self.config.access_token
-
         with self._lock:
-            fresh_enough = self._token and time.time() < self._expires_at
-            if fresh_enough and not force:
-                return self._token
-            result = fetch_client_credentials_token(
-                self.config.shop_domain, self.config.client_id, self.config.client_secret,
-                log=self._log,
+            if self.uses_client_credentials:
+                return self._client_credentials_token(force)
+            if self.uses_refresh_token:
+                return self._refreshed_token(force)
+            return self._static_token()
+
+    # ------------------------------------------------------------- internals
+    def _client_credentials_token(self, force: bool) -> str:
+        if self._minted and time.time() < self._minted_expires_at and not force:
+            return self._minted
+        grant = fetch_client_credentials_token(
+            self.config.shop_domain, self.config.client_id, self.config.client_secret,
+            log=self._log,
+        )
+        self._minted = str(grant["access_token"])
+        self._scope = str(grant["scope"])
+        self._minted_expires_at = time.time() + max(int(grant["expires_in"]) - REFRESH_MARGIN, 30)
+        self._log(
+            f"Access token minted, valid ~{int(grant['expires_in']) // 3600}h "
+            f"(scopes: {self._scope or 'as configured on the app'})",
+            "success",
+        )
+        return self._minted
+
+    def _refreshed_token(self, force: bool) -> str:
+        cfg = self.config
+        expires_at = float(getattr(cfg, "token_expires_at", 0.0) or 0.0)
+        fresh_enough = cfg.access_token and (
+            expires_at == 0 or time.time() < expires_at - REFRESH_MARGIN
+        )
+        if fresh_enough and not force:
+            return cfg.access_token
+
+        refresh_expiry = float(getattr(cfg, "refresh_token_expires_at", 0.0) or 0.0)
+        if refresh_expiry and time.time() > refresh_expiry:
+            raise OAuthError(
+                "The stored refresh token has expired (they last 90 days). Run the browser "
+                "OAuth flow again to get a new one."
             )
-            self._token = str(result["access_token"])
-            self._scope = str(result["scope"])
-            self._expires_at = time.time() + max(int(result["expires_in"]) - REFRESH_MARGIN, 30)
-            self._log(
-                f"Access token minted, valid ~{int(result['expires_in']) // 3600}h "
-                f"(scopes: {self._scope or 'as configured on the app'})",
-                "success",
+        grant = refresh_access_token(
+            cfg.shop_domain, cfg.client_id, cfg.client_secret, cfg.refresh_token, log=self._log,
+        )
+        apply_grant(cfg, grant)
+        self._scope = str(grant["scope"])
+        if self._save:
+            try:
+                self._save()
+            except Exception as exc:
+                self._log(f"Token refreshed but could not be saved: {exc}", "warn")
+        self._log("Access token refreshed.", "success")
+        return cfg.access_token
+
+    def _static_token(self) -> str:
+        cfg = self.config
+        if not cfg.access_token:
+            raise OAuthError(
+                "No Shopify Admin API token configured. Either paste an access token, or enter "
+                "the app's Client ID and secret and mint one."
             )
-            return self._token
+        problem = describe_token_problem(cfg.access_token)
+        if problem:
+            raise OAuthError(problem)
+        expires_at = float(getattr(cfg, "token_expires_at", 0.0) or 0.0)
+        if expires_at and time.time() > expires_at:
+            raise OAuthError(
+                "The stored access token has expired and there is no refresh token to renew it. "
+                "Get a new one from the app credentials."
+            )
+        return cfg.access_token
 
 
 def redirect_uri(port: int = DEFAULT_PORT) -> str:
@@ -276,7 +416,7 @@ def fetch_offline_token(
     client_secret: str,
     scopes: str = DEFAULT_SCOPES,
     port: int = DEFAULT_PORT,
-    timeout: int = 300,
+    timeout: int = 600,
     open_browser: bool = True,
     log: Optional[Callable[[str, str], None]] = None,
 ) -> Dict[str, str]:
@@ -311,11 +451,18 @@ def fetch_offline_token(
         })
         log(f"Opening {url}", "info")
         log(f"The app's redirect URL must include exactly: {redirect_uri(port)}", "info")
+        log("If the browser did not open, paste the URL above into it by hand.", "info")
         if open_browser:
             webbrowser.open(url)
 
         if not _CallbackHandler.done.wait(timeout):
-            raise OAuthError(f"Timed out after {timeout}s waiting for Shopify to call back")
+            raise OAuthError(
+                f"Timed out after {timeout}s waiting for Shopify to call back.\n"
+                "Shopify usually shows a page instead of redirecting when the app is not set "
+                f"up for this: check that {redirect_uri(port)} is listed in the app's allowed "
+                "redirect URLs (exactly, including the port) and that the app's distribution "
+                "lets it be installed on this store."
+            )
         if "error" in _CallbackHandler.result:
             raise OAuthError(_CallbackHandler.result["error"])
         code = _CallbackHandler.result["code"]

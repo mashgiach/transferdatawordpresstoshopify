@@ -63,8 +63,13 @@ class ShopifyConfig:
     client_secret: str = ""
     oauth_port: int = 3456
     # "client_credentials": mint (and re-mint) tokens from the app credentials.
-    # "token": use access_token as pasted.
+    # "token": use access_token as stored, refreshing it when a refresh token exists.
     auth_mode: str = "client_credentials"
+    # Filled in by the browser OAuth flow. Shopify may return an expiring token
+    # with a refresh token instead of a permanent one; both are supported.
+    refresh_token: str = ""
+    token_expires_at: float = 0.0          # epoch seconds; 0 = does not expire
+    refresh_token_expires_at: float = 0.0
 
     @property
     def domain(self) -> str:

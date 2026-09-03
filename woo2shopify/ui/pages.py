@@ -79,8 +79,9 @@ class ConnectionPage(PageBase):
                                   "Scopes needed: write_customers, write_orders, read_products, read_locations.")
         self.apiVersion = card.add("API version", combo(API_VERSIONS, shop.api_version))
         self.authMode = card.add("Auth mode", combo(["client_credentials", "token"], shop.auth_mode),
-                                 "client_credentials: the tool mints its own tokens from the app's Client ID "
-                                 "and secret, and renews them every 24h. token: use the token above as-is.")
+                                 "client_credentials: mint 24h tokens from the app credentials "
+                                 "(development stores in your own organization only). token: use the stored "
+                                 "token, refreshing it when a refresh token is available.")
         self.orderApi = card.add("Order API", combo(["graphql", "rest"], shop.order_api),
                                  "GraphQL is the default. Switch to REST if your store rejects orderCreate.")
         self.locationId = card.add("Location ID (optional)", line_edit("gid://shopify/Location/123", shop.location_id),
@@ -91,13 +92,14 @@ class ConnectionPage(PageBase):
         blurb = BodyLabel(
             "A Dev Dashboard app never shows you an Admin API token — it gives you a Client ID "
             "and Client secret, which have to be exchanged for one. Enter them here.\n\n"
-            "Mint token: one request, no browser. Works when the app and the store are in the "
-            "same Shopify organization — an app you built and installed on your own store. "
-            "These tokens last 24 hours, so leave Auth mode on client_credentials and the tool "
-            "renews them mid-run by itself.\n\n"
-            "Browser OAuth: for a store outside the app's organization, such as a client's shop. "
-            f"Register {oauth_redirect_uri()} as an allowed redirect URL on the app first. "
-            "It returns a token that does not expire.", card)
+            "Mint token (client credentials): one request, no browser — but Shopify allows it "
+            "only on development stores created in the Dev Dashboard under the same organization "
+            "as the app. On a paid or trial store it fails with shop_not_permitted.\n\n"
+            "Browser OAuth (authorization code grant): works on a real store. Set the app's "
+            f"distribution to Custom distribution for the store, add {oauth_redirect_uri()} to "
+            "its allowed redirect URLs, then press it and approve the install. Shopify may "
+            "return a short-lived token with a refresh token; either way the tool stores what it "
+            "needs and renews it for you.", card)
         blurb.setWordWrap(True)
         card.add_widget(blurb)
         form = FormBlock(card)
@@ -108,11 +110,12 @@ class ConnectionPage(PageBase):
         self.oauthPort = form.add("Callback port (browser OAuth only)", spin(1024, 65535, shop.oauth_port),
                                   "Must match the port in the redirect URL registered on the app.")
         card.add_widget(form)
-        self.mintBtn = PrimaryPushButton(FluentIcon.CERTIFICATE, "Mint token")
-        self.oauthBtn = PushButton(FluentIcon.GLOBE, "Browser OAuth instead")
+        # browser OAuth first: it is the one that works on a live store
+        self.oauthBtn = PrimaryPushButton(FluentIcon.GLOBE, "Browser OAuth (any store)")
+        self.mintBtn = PushButton(FluentIcon.CERTIFICATE, "Mint token (dev stores)")
         self.mintBtn.clicked.connect(self.mintRequested.emit)
         self.oauthBtn.clicked.connect(self.oauthRequested.emit)
-        card.add_widget(row(self.mintBtn, self.oauthBtn))
+        card.add_widget(row(self.oauthBtn, self.mintBtn))
         self.add_card(card)
 
         self.wooTestBtn = PushButton(FluentIcon.SYNC, "Test WooCommerce")

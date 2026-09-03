@@ -71,6 +71,7 @@ class ShopifyClient:
         log: Optional[Callable[[str, str], None]] = None,
         max_retries: int = 5,
         request_delay: float = 0.0,
+        save=None,
     ):
         self.cfg = cfg
         self.max_retries = max_retries
@@ -84,7 +85,7 @@ class ShopifyClient:
                 "User-Agent": "woo2shopify/1.0",
             }
         )
-        self.tokens = TokenSource(cfg, log=self._log)
+        self.tokens = TokenSource(cfg, log=self._log, save=save)
         self._available = 1000.0
         self._restore_rate = 50.0
 

@@ -21,7 +21,7 @@ from qfluentwidgets import (
 )
 
 from ..config import AppConfig, CONFIG_PATH, ensure_dirs
-from ..oauth import describe_token_problem
+from ..oauth import apply_grant, describe_token_problem
 from ..state import StateStore
 from .pages import ConnectionPage, OptionsPage, ProductsPage, ReportsPage, RunPage
 from .worker import ConnectionTestWorker, MigrationWorker, TokenWorker
@@ -158,15 +158,14 @@ class MainWindow(FluentWindow):
         self.connectionPage.mintBtn.setEnabled(enabled)
         self.connectionPage.oauthBtn.setEnabled(enabled)
 
-    def on_token_result(self, ok: bool, token: str, message: str) -> None:
+    def on_token_result(self, ok: bool, grant: dict, message: str) -> None:
         self._set_token_buttons(True)
         self.runPage.append_log(message, "success" if ok else "error")
         if ok:
             # a client-credentials token dies in 24h, so keep the renewing mode on
             mode = "client_credentials" if getattr(self, "_tokenMode", "") == "client_credentials" else "token"
-            self.connectionPage.set_token(token, mode)
-            self.config.shopify.access_token = token
-            self.config.shopify.auth_mode = mode
+            apply_grant(self.config.shopify, grant, auth_mode=mode)
+            self.connectionPage.set_token(self.config.shopify.access_token, mode)
             self.config.save()
             self.switchTo(self.connectionPage)
             self.toast("Token ready", message + ". Try 'Test Shopify'.", "success")

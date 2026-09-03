@@ -108,7 +108,9 @@ class ClientCredentialsTest(unittest.TestCase):
         response.json.return_value = {"access_token": "tok_1", "scope": "write_orders", "expires_in": 86399}
         with mock.patch.object(oauth.requests, "post", return_value=response) as post:
             result = oauth.fetch_client_credentials_token(SHOP, CLIENT_ID, SECRET)
-        self.assertEqual(result, {"access_token": "tok_1", "scope": "write_orders", "expires_in": 86399})
+        self.assertEqual(result["access_token"], "tok_1")
+        self.assertEqual(result["scope"], "write_orders")
+        self.assertEqual(result["expires_in"], 86399)
         args, kwargs = post.call_args
         self.assertEqual(args[0], f"https://{SHOP}/admin/oauth/access_token")
         self.assertEqual(kwargs["data"], {
@@ -149,7 +151,7 @@ class ClientCredentialsTest(unittest.TestCase):
             self.assertEqual(source.token(), "tok_1")
             self.assertEqual(source.token(), "tok_1")      # cached, no second request
             self.assertEqual(len(calls), 1)
-            source._expires_at = 0                          # pretend 24h went by
+            source._minted_expires_at = 0                   # pretend 24h went by
             self.assertEqual(source.token(), "tok_2")
             self.assertEqual(source.token(force=True), "tok_3")
         self.assertEqual(len(calls), 3)
@@ -168,6 +170,133 @@ class ClientCredentialsTest(unittest.TestCase):
         with self.assertRaises(oauth.OAuthError) as ctx:
             source.token()
         self.assertIn("No Shopify Admin API token", str(ctx.exception))
+
+
+class RefreshTokenTest(unittest.TestCase):
+    """The authorization code grant now returns a 1-hour token plus a refresh token."""
+
+    def _config(self, **overrides):
+        from woo2shopify.config import ShopifyConfig
+
+        base = dict(shop_domain=SHOP, client_id=CLIENT_ID, client_secret=SECRET,
+                    auth_mode="token", access_token="old_token", refresh_token="shprt_x")
+        base.update(overrides)
+        return ShopifyConfig(**base)
+
+    def test_apply_grant_records_both_expiries(self):
+        cfg = self._config(access_token="", refresh_token="")
+        oauth.apply_grant(cfg, {
+            "access_token": "new_token", "scope": "write_orders", "expires_in": 3600,
+            "refresh_token": "shprt_new", "refresh_token_expires_in": 7776000,
+        })
+        self.assertEqual(cfg.access_token, "new_token")
+        self.assertEqual(cfg.refresh_token, "shprt_new")
+        self.assertAlmostEqual(cfg.token_expires_at - time.time(), 3600, delta=5)
+        self.assertAlmostEqual(cfg.refresh_token_expires_at - time.time(), 7776000, delta=5)
+
+    def test_apply_grant_marks_a_permanent_token_as_never_expiring(self):
+        cfg = self._config(access_token="", refresh_token="")
+        oauth.apply_grant(cfg, {"access_token": "forever", "scope": "", "expires_in": 0})
+        self.assertEqual(cfg.token_expires_at, 0.0)
+        self.assertEqual(cfg.refresh_token, "")
+
+    def test_refresh_request_body(self):
+        response = mock.Mock(status_code=200)
+        response.json.return_value = {"access_token": "t2", "scope": "write_orders",
+                                      "expires_in": 3600, "refresh_token": "shprt_2",
+                                      "refresh_token_expires_in": 7776000}
+        with mock.patch.object(oauth.requests, "post", return_value=response) as post:
+            oauth.refresh_access_token(SHOP, CLIENT_ID, SECRET, "shprt_1")
+        self.assertEqual(post.call_args[1]["data"], {
+            "client_id": CLIENT_ID, "client_secret": SECRET,
+            "grant_type": "refresh_token", "refresh_token": "shprt_1",
+        })
+
+    def test_expiring_token_is_refreshed_and_persisted(self):
+        cfg = self._config(token_expires_at=time.time() + 10)   # about to lapse
+        saved = []
+        source = oauth.TokenSource(cfg, save=lambda: saved.append(cfg.access_token))
+        grant = {"access_token": "fresh", "scope": "write_orders", "expires_in": 3600,
+                 "refresh_token": "shprt_rotated", "refresh_token_expires_in": 7776000}
+        with mock.patch.object(oauth, "refresh_access_token", return_value=grant) as refresh:
+            self.assertEqual(source.token(), "fresh")
+            self.assertEqual(source.token(), "fresh")     # now cached
+        refresh.assert_called_once()
+        self.assertEqual(cfg.refresh_token, "shprt_rotated", "a rotated refresh token must be kept")
+        self.assertEqual(saved, ["fresh"], "the new token must be written to the config file")
+
+    def test_valid_token_is_not_refreshed(self):
+        cfg = self._config(token_expires_at=time.time() + 3600)
+        source = oauth.TokenSource(cfg)
+        with mock.patch.object(oauth, "refresh_access_token") as refresh:
+            self.assertEqual(source.token(), "old_token")
+        refresh.assert_not_called()
+
+    def test_permanent_token_with_refresh_token_is_reused(self):
+        cfg = self._config(token_expires_at=0.0)
+        source = oauth.TokenSource(cfg)
+        with mock.patch.object(oauth, "refresh_access_token") as refresh:
+            self.assertEqual(source.token(), "old_token")
+        refresh.assert_not_called()
+
+    def test_lapsed_refresh_token_says_to_redo_oauth(self):
+        cfg = self._config(token_expires_at=time.time() - 1,
+                           refresh_token_expires_at=time.time() - 1)
+        source = oauth.TokenSource(cfg)
+        with self.assertRaises(oauth.OAuthError) as ctx:
+            source.token()
+        self.assertIn("90 days", str(ctx.exception))
+
+    def test_expired_token_without_refresh_token_is_reported(self):
+        cfg = self._config(refresh_token="", token_expires_at=time.time() - 1)
+        source = oauth.TokenSource(cfg)
+        self.assertFalse(source.can_refresh)
+        with self.assertRaises(oauth.OAuthError) as ctx:
+            source.token()
+        self.assertIn("expired", str(ctx.exception))
+
+    def test_401_forces_a_refresh_in_this_mode_too(self):
+        from woo2shopify.shopify_api import ShopifyClient
+
+        cfg = self._config(token_expires_at=time.time() + 3600)
+        client = ShopifyClient(cfg, max_retries=3)
+        grant = {"access_token": "after_401", "scope": "", "expires_in": 3600,
+                 "refresh_token": "shprt_x", "refresh_token_expires_in": 7776000}
+        expired = mock.Mock(status_code=401, text='{"errors":"[API] Invalid API key or access token"}')
+        ok = mock.Mock(status_code=200)
+        ok.json.return_value = {"data": {"shop": {"name": "Test Store"}}, "extensions": {}}
+        sent = []
+
+        def fake_post(url, **kwargs):
+            sent.append(client.session.headers["X-Shopify-Access-Token"])
+            return expired if len(sent) == 1 else ok
+
+        with mock.patch.object(oauth, "refresh_access_token", return_value=grant), \
+             mock.patch.object(client.session, "post", side_effect=fake_post):
+            client.graphql("{ shop { name } }")
+        self.assertEqual(sent, ["old_token", "after_401"])
+
+
+class GrantErrorTest(unittest.TestCase):
+    def test_shop_not_permitted_is_explained_concretely(self):
+        html = ('<!DOCTYPE html><html><head><title>400 - Oauth error shop_not_permitted'
+                '</title></head><body>x</body></html>')
+        response = mock.Mock(status_code=400, text=html)
+        with mock.patch.object(oauth.requests, "post", return_value=response):
+            with self.assertRaises(oauth.OAuthError) as ctx:
+                oauth.fetch_client_credentials_token(SHOP, CLIENT_ID, SECRET)
+        message = str(ctx.exception)
+        self.assertIn("shop_not_permitted", message)
+        self.assertIn("development stores", message)
+        self.assertIn("Custom distribution", message)
+        self.assertNotIn("<!DOCTYPE", message, "the HTML page must not be dumped at the user")
+
+    def test_html_bodies_are_reduced_to_their_title(self):
+        self.assertEqual(
+            oauth.clean_error_body('<!DOCTYPE html><html><head><title>400 - Oauth error x</title></head>'),
+            "400 - Oauth error x",
+        )
+        self.assertEqual(oauth.clean_error_body('{"error":"invalid_client"}'), '{"error":"invalid_client"}')
 
 
 class WrongCredentialTest(unittest.TestCase):

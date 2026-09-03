@@ -10,6 +10,7 @@ from .config import AppConfig, CONFIG_PATH, STATE_PATH, ensure_dirs
 from .migrator import Control, Migrator, Reporter
 from .oauth import (
     DEFAULT_SCOPES,
+    apply_grant,
     fetch_client_credentials_token,
     fetch_offline_token,
     redirect_uri,
@@ -104,8 +105,7 @@ def main(argv=None) -> int:
                 config.shopify.client_secret,
                 log=lambda message, level="info": print(f"[{level}] {message}"),
             )
-            config.shopify.access_token = str(result["access_token"])
-            config.shopify.auth_mode = "client_credentials"
+            apply_grant(config.shopify, result, auth_mode="client_credentials")
             config.save(config_path)
             print(f"Token saved to {config_path}")
             print(f"  scopes:  {result['scope'] or 'as configured on the app version'}")
@@ -124,9 +124,12 @@ def main(argv=None) -> int:
                 open_browser=not args.no_browser,
                 log=lambda message, level="info": print(f"[{level}] {message}"),
             )
-            config.shopify.access_token = result["access_token"]
+            apply_grant(config.shopify, result, auth_mode="token")
             config.save(config_path)
+            lifetime = int(result.get("expires_in") or 0)
             print(f"Access token saved to {config_path} (scopes: {result['scope']})")
+            print("  lifetime: " + (f"{lifetime // 60} min, refreshed automatically from the "
+                                    "stored refresh token" if lifetime else "does not expire"))
         elif args.command == "test":
             shop = migrator.test_shopify()
             print(f"Shopify OK: {shop.get('name')} ({shop.get('myshopifyDomain')})")

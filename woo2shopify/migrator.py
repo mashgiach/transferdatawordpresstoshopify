@@ -79,6 +79,7 @@ class Migrator:
             log=self.reporter.log,
             max_retries=self.opts.max_retries,
             request_delay=self.opts.request_delay,
+            save=config.save,          # a token refreshed mid-run outlives the run
         )
         self.location_gid = config.shopify.location_id or ""
         self.stats: Dict[str, int] = {

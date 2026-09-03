@@ -110,7 +110,7 @@ class TokenWorker(QThread):
     """
 
     sig_log = pyqtSignal(str, str)
-    sig_result = pyqtSignal(bool, str, str)  # ok, token, message
+    sig_result = pyqtSignal(bool, dict, str)  # ok, grant, message
 
     def __init__(self, config: AppConfig, mode: str = "client_credentials", scopes: str = "", parent=None):
         super().__init__(parent)
@@ -127,7 +127,10 @@ class TokenWorker(QThread):
                     shop.shop_domain, shop.client_id, shop.client_secret,
                     scopes=self.scopes, port=shop.oauth_port, log=log,
                 )
-                note = f"Offline token granted for {result['scope']}"
+                lifetime = int(result.get("expires_in") or 0)
+                note = ("Token granted for " + (result["scope"] or "the requested scopes")
+                        + (f" — expires in {lifetime // 60} min, refreshed automatically"
+                           if lifetime else " — does not expire"))
             else:
                 result = fetch_client_credentials_token(
                     shop.shop_domain, shop.client_id, shop.client_secret, log=log,
@@ -136,6 +139,6 @@ class TokenWorker(QThread):
                 granted = result["scope"] or "the scopes configured on the app"
                 note = (f"Token minted for {granted} — valid ~{hours}h, "
                         "renewed automatically during a run")
-            self.sig_result.emit(True, str(result["access_token"]), note)
+            self.sig_result.emit(True, dict(result), note)
         except Exception as exc:
-            self.sig_result.emit(False, "", f"{type(exc).__name__}: {exc}")
+            self.sig_result.emit(False, {}, f"{type(exc).__name__}: {exc}")
