@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from tests.mock_server import start_server  # noqa: E402
 from woo2shopify import transform  # noqa: E402
 from woo2shopify.config import AppConfig, ShopifyConfig  # noqa: E402
+from woo2shopify.config import MigrationOptions
 from woo2shopify.migrator import Migrator, Reporter  # noqa: E402
 
 
@@ -160,6 +161,75 @@ class MigrationTest(MockStoreHarness, unittest.TestCase):
         sam = next(c for c in self.recorder.customers if c.get("email") == "sam@example.com")
         self.assertNotIn("phone", sam)
         self.assertEqual([m for l, m in logs if l == "error"], [])
+        migrator.close()
+
+
+class OrderPayloadFieldsTest(MockStoreHarness, unittest.TestCase):
+    """Regression coverage for the exact fields Shopify's orderCreate rejected."""
+
+    def test_custom_attributes_use_key_not_name(self):
+        from woo2shopify import transform
+
+        order = {
+            "id": 264276, "number": "264276", "status": "processing", "currency": "ILS",
+            "date_created_gmt": "2024-01-01T00:00:00", "discount_total": "0",
+            "prices_include_tax": False, "billing": {}, "shipping": {},
+            "line_items": [], "shipping_lines": [], "tax_lines": [], "fee_lines": [],
+            "coupon_lines": [], "refunds": [],
+        }
+        payload, _options, _warnings = transform.order_to_graphql(order, MigrationOptions(), None)
+        for attr in payload["customAttributes"]:
+            self.assertIn("key", attr, attr)
+            self.assertNotIn("name", attr, "GraphQL AttributeInput has no 'name' field")
+            self.assertIsNotNone(attr["key"])
+
+    def test_invalid_location_gid_is_dropped_not_sent(self):
+        from woo2shopify import transform
+
+        order = {
+            "id": 1, "number": "1", "status": "completed", "currency": "ILS",
+            "date_created_gmt": "2024-01-01T00:00:00", "discount_total": "0",
+            "prices_include_tax": False, "billing": {}, "shipping": {},
+            "line_items": [], "shipping_lines": [], "tax_lines": [], "fee_lines": [],
+            "coupon_lines": [], "refunds": [],
+        }
+        opts = MigrationOptions(import_fulfillments=True)
+        bad_gid = "https://quickstart-30a97598.myshopify.com/admin/api/2026-07/graphql.json"
+        payload, _options, _warnings = transform.order_to_graphql(order, opts, None, location_gid=bad_gid)
+        self.assertNotIn("fulfillment", payload, "an invalid location id must never reach the API")
+
+        payload, _options, _warnings = transform.order_to_graphql(
+            order, opts, None, location_gid="gid://shopify/Location/1234567890"
+        )
+        self.assertEqual(payload["fulfillment"]["locationId"], "gid://shopify/Location/1234567890")
+
+    def test_migrator_sanitizes_a_bad_configured_location_id(self):
+        config = AppConfig()
+        config.woo.base_url = SERVER["base"]
+        config.woo.consumer_key = "ck"
+        config.woo.consumer_secret = "cs"
+        config.shopify.shop_domain = "test.myshopify.com"
+        config.shopify.access_token = "shpat_test"
+        config.shopify.location_id = "/admin/api/2026-07/graphql.json"
+        logs = []
+        migrator = Migrator(
+            config, reporter=Reporter(on_log=lambda m, level="info": logs.append((level, m))),
+            state_path=Path(tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False).name),
+        )
+        self.assertEqual(migrator.location_gid, "")
+        self.assertTrue(any("Ignoring the configured Location ID" in m for _l, m in logs))
+        migrator.close()
+
+    def test_run_writes_valid_fulfillment_location(self):
+        migrator, logs = self.build()
+        migrator.location_gid = "gid://shopify/Location/55"  # matches the mock's location
+        migrator.run()
+        errors = [m for l, m in logs if l == "error"]
+        self.assertEqual(errors, [])
+        completed = next(o for o in self.recorder.orders if any(
+            a.get("key") == "woo_order_number" and a.get("value") == "501" for a in o.get("customAttributes", [])
+        ))
+        self.assertEqual(completed["fulfillment"]["locationId"], "gid://shopify/Location/55")
         migrator.close()
 
 

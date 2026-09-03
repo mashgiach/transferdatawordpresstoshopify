@@ -22,6 +22,7 @@ FINANCIAL_STATUS = {
 }
 
 PROVINCE_CODE_RE = re.compile(r"^[A-Za-z0-9]{1,3}$")
+LOCATION_GID_RE = re.compile(r"^gid://shopify/Location/\d+$")
 E164_RE = re.compile(r"^\+[1-9]\d{7,15}$")
 
 
@@ -37,6 +38,10 @@ def dec(value: Any) -> Decimal:
 
 def money_str(value: Any) -> str:
     return f"{dec(value):.2f}"
+
+
+def is_valid_location_gid(value: str) -> bool:
+    return bool(value and LOCATION_GID_RE.match(value.strip()))
 
 
 def money_bag(amount: Any, currency: str) -> Dict[str, Any]:
@@ -421,7 +426,7 @@ def _discount_total(order: Dict[str, Any]) -> Decimal:
     return dec(order.get("discount_total"))
 
 
-def _note_attributes(order: Dict[str, Any]) -> List[Dict[str, str]]:
+def _note_attribute_pairs(order: Dict[str, Any]) -> List[Tuple[str, str]]:
     attrs = [
         ("woo_order_id", str(order.get("id") or "")),
         ("woo_order_number", str(order.get("number") or "")),
@@ -437,7 +442,17 @@ def _note_attributes(order: Dict[str, Any]) -> List[Dict[str, str]]:
     coupons = ", ".join(c.get("code", "") for c in (order.get("coupon_lines") or []) if c.get("code"))
     if coupons:
         attrs.append(("woo_coupons", coupons))
-    return [{"name": k, "value": v[:255]} for k, v in attrs if v]
+    return [(k, v[:255]) for k, v in attrs if v]
+
+
+def _note_attributes_graphql(order: Dict[str, Any]) -> List[Dict[str, str]]:
+    # OrderCreateOrderInput.customAttributes is [AttributeInput!], which takes
+    # key/value — not name/value like the REST note_attributes field below.
+    return [{"key": k, "value": v} for k, v in _note_attribute_pairs(order)]
+
+
+def _note_attributes_rest(order: Dict[str, Any]) -> List[Dict[str, str]]:
+    return [{"name": k, "value": v} for k, v in _note_attribute_pairs(order)]
 
 
 def order_to_graphql(
@@ -461,7 +476,7 @@ def order_to_graphql(
         "processedAt": iso_z(order.get("date_created_gmt") or order.get("date_created")),
         "financialStatus": fin,
         "tags": order_tags(order, opts),
-        "customAttributes": _note_attributes(order),
+        "customAttributes": _note_attributes_graphql(order),
         "taxesIncluded": bool(order.get("prices_include_tax")),
         "sourceName": "woocommerce",
         "test": False,
@@ -535,7 +550,7 @@ def order_to_graphql(
             "processedAt": iso_z(order.get("date_paid_gmt") or order.get("date_created_gmt")),
         }]
 
-    if opts.import_fulfillments and status == "completed" and location_gid:
+    if opts.import_fulfillments and status == "completed" and is_valid_location_gid(location_gid):
         payload["fulfillment"] = {"locationId": location_gid, "notifyCustomer": False}
 
     if status in ("cancelled", "failed"):
@@ -581,7 +596,7 @@ def order_to_rest(
         "processed_at": iso_z(order.get("date_created_gmt") or order.get("date_created")),
         "created_at": iso_z(order.get("date_created_gmt") or order.get("date_created")),
         "tags": ", ".join(order_tags(order, opts)),
-        "note_attributes": _note_attributes(order),
+        "note_attributes": _note_attributes_rest(order),
         "taxes_included": bool(order.get("prices_include_tax")),
         "source_name": "woocommerce",
         "inventory_behaviour": opts.inventory_behaviour.lower(),

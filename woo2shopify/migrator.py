@@ -81,7 +81,7 @@ class Migrator:
             request_delay=self.opts.request_delay,
             save=config.save,          # a token refreshed mid-run outlives the run
         )
-        self.location_gid = config.shopify.location_id or ""
+        self.location_gid = self._sanitized_location_id(config.shopify.location_id)
         self.stats: Dict[str, int] = {
             "customers_created": 0,
             "customers_existing": 0,
@@ -97,6 +97,20 @@ class Migrator:
     # ------------------------------------------------------------- lifecycle
     def close(self) -> None:
         self.state.close()
+
+    def _sanitized_location_id(self, raw: str) -> str:
+        raw = (raw or "").strip()
+        if not raw:
+            return ""
+        if transform.is_valid_location_gid(raw):
+            return raw
+        self.reporter.log(
+            f"Ignoring the configured Location ID ({raw!r}) — it is not a valid "
+            "gid://shopify/Location/<number>. Leave it blank to auto-detect, or fix it on the "
+            "Connections page. Fulfilments will be skipped until this is corrected.",
+            "warn",
+        )
+        return ""
 
     def _bump(self, key: str, amount: int = 1) -> None:
         self.stats[key] = self.stats.get(key, 0) + amount

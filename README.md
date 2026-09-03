@@ -159,6 +159,13 @@ python -m woo2shopify.cli report                # CSVs in ~/.woo2shopify/exports
 4. Customers, then orders, oldest to newest.
 5. Check the Reports page, re-run to retry failures.
 
+## Location ID
+
+Leave this blank — the tool auto-detects your primary location on *Test Shopify*. If you
+fill it in yourself it must be exactly `gid://shopify/Location/<number>`; anything else
+(a pasted URL, an admin link) is detected and dropped with a warning rather than sent to
+Shopify, and fulfilments are skipped until it's fixed.
+
 ## Scopes, and why a run can stop immediately
 
 Before touching anything the tool asks Shopify which scopes the token actually carries
